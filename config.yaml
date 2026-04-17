@@ -1,1 +1,14 @@
-# Configuration file for badminton vision application
+video_input: "data/input/match_clip.mp4"
+video_output: "data/output/processed_clip.mp4"
+
+models:
+  yolo_weights: "weights/yolov8n.pt"  # Nano version for speed, upgrade to 's' or 'm' if needed
+  tracknet_weights: "weights/tracknet_v3.pt"
+  resnet_weights: "weights/resnet50_court.pt"
+  transformer_weights: "weights/stroke_transformer.pt"
+
+parameters:
+  tracknet_buffer_size: 8       # TrackNetV3 usually requires a sequence of frames
+  swing_sequence_length: 15     # Number of frames to crop for stroke classification
+  person_class_id: 0            # COCO dataset class ID for 'person'
+  yolo_confidence: 0.5          # Minimum confidence for player detection

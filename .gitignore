@@ -1,0 +1,11 @@
+/data/input/*.mp4
+/data/input/*.avi
+/data/input/*.mkv
+/data/input/*.mov
+/data/output/*.mp4
+/data/output/*.avi
+/data/output/*.mkv
+/data/output/*.mov
+
+*.pt
+*.npy
