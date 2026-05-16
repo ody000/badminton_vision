@@ -10,3 +10,5 @@ ISSUES.md
 *.pyd
 __pycache__/
 .venv/
+
+slayminton/

@@ -54,17 +54,11 @@ mkdir -p data/output/logs
 # OSCAR: load CUDA + cuDNN modules, then activate your conda/venv.
 # Uncomment and edit the lines that match your setup:
 #
-module load cuda/11.8.0-kuhf cudnn/8.7.0.84-11.8-kff3
-# module load python/3.10.12                    # if using OSCAR module python
-#
-# source ~/miniconda3/etc/profile.d/conda.sh    # conda (most common on OSCAR)
-# conda activate /users/zshen38/ulg_new_env                      # ← your env name here
-#
-source .venv/bin/activate                     # plain venv alternative
+cd "$(dirname "$(realpath "$0")")"  # Ensure we're in project root
+source .venv/bin/activate
 
-# After activation, use plain python from the activated venv.
-# (uv run python doesn't respect the activated environment)
-PYTHON="python"
+# Use uv run with verbose and unbuffered output flags (like slayminton)
+PYTHON="uv run -v python -u"
 
 # Sanity-check: abort immediately if torch is missing rather than failing deep
 # inside a torchrun subprocess with a cryptic error.

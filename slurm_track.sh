@@ -34,14 +34,11 @@ DEVICE="${DEVICE:-cuda}"
 mkdir -p data/output/logs
 
 # ── Activate environment ──────────────────────────────────────────────────────
-# Load CUDA + cuDNN modules (required for torch CUDA support)
-module load cuda/11.8.0-kuhf cudnn/8.7.0.84-11.8-kff3
+cd "$(dirname "$(realpath "$0")")"  # Ensure we're in project root
+source .venv/bin/activate
 
-source .venv/bin/activate                     # plain venv alternative
-
-# After activation, use plain python from the activated venv.
-# (uv run python doesn't respect the activated environment)
-PYTHON="python"
+# Use uv run with verbose and unbuffered output flags (like slayminton)
+PYTHON="uv run -v python -u"
 
 # Sanity-check: abort immediately if torch is missing rather than failing deep
 # inside a subprocess with a cryptic error.
