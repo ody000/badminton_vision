@@ -14,6 +14,8 @@
 #   DEVICE          — cpu / cuda (default: cuda)
 
 #SBATCH --job-name=badminton_track
+#SBATCH --partition=gpu
+#SBATCH --nodes=1
 #SBATCH --time=4:00:00
 #SBATCH --mem=16G
 #SBATCH -o data/output/logs/slurm-%j.out

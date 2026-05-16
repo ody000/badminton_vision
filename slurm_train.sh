@@ -3,17 +3,30 @@
 #
 # Modes: train-tracknet | train-yolo | train-stroke | run-main
 #
-# Default: 2 GPUs (Brown OSCAR cap per job).
-# To use 1 GPU, pass --gres=gpu:1 AND NGPUS=1 together:
+# Brown OSCAR GPU partitions:
+#   gpu          — general GPU pool (V100/A100, up to 2 GPUs per job)
+#   gpu-he       — high-end GPU (A100 80 GB), limited allocation
+#   3090-gcondo  — RTX 3090 condo nodes (if you have allocation)
 #
+# Default: 2 GPUs on the 'gpu' partition (OSCAR cap per job).
+# Common overrides:
+#
+#   # 2 GPUs, default partition
 #   sbatch --export=MODE=train-tracknet slurm_train.sh
-#   sbatch --export=MODE=train-tracknet,NGPUS=1 --gres=gpu:1 slurm_train.sh
-#   sbatch --export=MODE=run-main,VIDEO_PATH=data/input/match.mp4 slurm_train.sh
+#
+#   # 1 GPU (faster queue time for stroke classifier)
+#   sbatch -p gpu --gres=gpu:1 --export=MODE=train-stroke,NGPUS=1,FINEBADMINTON_DIR=/oscar/scratch/$USER/finebadminton20k slurm_train.sh
+#
+#   # Inference only (no GPU needed beyond 1)
+#   sbatch -p gpu --gres=gpu:1 --export=MODE=run-main,VIDEO_PATH=data/input/match_clip.mp4 slurm_train.sh
 #
 # NOTE: #SBATCH directives are parsed as literal text — shell variables do NOT
-# expand inside them.  Override --gres on the sbatch command line instead.
+# expand inside them.  Override --partition and --gres on the sbatch command
+# line instead of editing these lines.
 
 #SBATCH --job-name=badminton_vision
+#SBATCH --partition=gpu
+#SBATCH --nodes=1
 #SBATCH --time=24:00:00
 #SBATCH --mem=32G
 #SBATCH -o data/output/logs/slurm-%j.out
