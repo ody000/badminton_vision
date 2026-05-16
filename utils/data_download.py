@@ -649,7 +649,19 @@ def main() -> None:
             "Default: data/input/finebadminton"
         ),
     )
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help=(
+            "Print a structured report of what is on disk under data/input/ "
+            "without downloading or merging anything. Useful for debugging."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.diagnose:
+        _diagnose()
+        return
 
     if not (args.roboflow or args.finebadminton or args.all):
         parser.print_help()
@@ -661,6 +673,90 @@ def main() -> None:
 
     if args.finebadminton or args.all:
         download_finebadminton(hf_dir=args.hf_dir)
+
+
+def _diagnose() -> None:
+    """Print a structured report of data/input/ to help debug download/merge issues."""
+    import glob
+
+    print("=" * 60)
+    print("DIAGNOSE: data/input layout")
+    print(f"  CWD: {os.getcwd()}")
+    print("=" * 60)
+
+    for section, root in [
+        ("RAW ROBOFLOW DOWNLOADS", ROBOFLOW_RAW_DIR),
+        ("MERGED TRAIN DIR",       ROBOFLOW_TRAIN_DIR),
+        ("FINEBADMINTON",          FINEBADMINTON_DIR),
+    ]:
+        print(f"\n── {section} ({root}) ──")
+        abs_root = os.path.abspath(root)
+        if not os.path.isdir(abs_root):
+            print(f"   [NOT FOUND]  {abs_root}")
+            continue
+
+        total_files = 0
+        for dirpath, dirnames, filenames in os.walk(abs_root):
+            dirnames.sort()
+            rel = os.path.relpath(dirpath, abs_root)
+            indent = "   " + "  " * rel.count(os.sep)
+            if rel == ".":
+                print(f"   {abs_root}/")
+            else:
+                print(f"{indent}{os.path.basename(dirpath)}/")
+            for fname in sorted(filenames):
+                fpath = os.path.join(dirpath, fname)
+                size  = os.path.getsize(fpath)
+                total_files += 1
+                if total_files <= 30 or fname.endswith(".json"):
+                    print(f"{indent}  {fname}  ({size:,} bytes)")
+                elif total_files == 31:
+                    print(f"{indent}  ... (truncated, use 'find {root} -type f | wc -l' for count)")
+
+        # COCO JSON report
+        json_files = []
+        for dirpath, _, filenames in os.walk(abs_root):
+            for f in filenames:
+                if f.endswith(".json") and "annotation" in f.lower():
+                    json_files.append(os.path.join(dirpath, f))
+        if json_files:
+            print(f"\n   COCO JSONs found:")
+            for jf in json_files:
+                try:
+                    with open(jf) as f:
+                        d = json.load(f)
+                    n_imgs  = len(d.get("images", []))
+                    n_anns  = len(d.get("annotations", []))
+                    cats    = [c["name"] for c in d.get("categories", [])]
+                    # Check how many image files actually exist on disk
+                    img_dir   = os.path.dirname(jf)
+                    n_present = sum(
+                        1 for img in d.get("images", [])
+                        if os.path.isfile(os.path.join(img_dir, os.path.basename(img["file_name"])))
+                        or os.path.isfile(os.path.join(img_dir, img["file_name"]))
+                    )
+                    print(f"     {os.path.relpath(jf, abs_root)}")
+                    print(f"       images in JSON : {n_imgs}  (files present: {n_present})")
+                    print(f"       annotations    : {n_anns}")
+                    print(f"       categories     : {cats}")
+                    if n_present < n_imgs:
+                        print(f"       *** WARNING: {n_imgs - n_present} image files missing on disk ***")
+                        # Show first missing example
+                        for img in d.get("images", [])[:3]:
+                            p1 = os.path.join(img_dir, os.path.basename(img["file_name"]))
+                            p2 = os.path.join(img_dir, img["file_name"])
+                            if not os.path.isfile(p1) and not os.path.isfile(p2):
+                                print(f"       Example missing: file_name={img['file_name']!r}")
+                                print(f"         tried: {os.path.relpath(p1, abs_root)}")
+                                print(f"         tried: {os.path.relpath(p2, abs_root)}")
+                                break
+                except Exception as e:
+                    print(f"     {jf}  [ERROR reading: {e}]")
+        else:
+            print(f"\n   No COCO annotation JSONs found under {root}/")
+        print(f"\n   Total files: {total_files}")
+
+    print("\n" + "=" * 60)
 
 
 if __name__ == "__main__":
