@@ -26,14 +26,14 @@ import os
 import sys
 
 ROBOFLOW_WORKSPACE = "badminton-rojkf"
-ROBOFLOW_PROJECT = "badminton-hehp8"
-ROBOFLOW_VERSION = 1
-ROBOFLOW_FORMAT = "coco"
+ROBOFLOW_PROJECT   = "badminton-hehp8"
+ROBOFLOW_FORMAT    = "coco"
 ROBOFLOW_TRAIN_DIR = "data/input/train"
+# Version is discovered automatically at runtime — do not hardcode.
 
 FINEBADMINTON_DIR    = "data/input/finebadminton"
-FINEBADMINTON_HF_ID  = "ILEARN-Lab/FineBadminton20K"   # confirm on HuggingFace before use
-FINEBADMINTON_URL    = "https://huggingface.co/datasets/ILEARN-Lab/FineBadminton20K"
+FINEBADMINTON_HF_ID  = "iLearn-Lab/Finebadminton-20K"   # confirm on HuggingFace before use
+FINEBADMINTON_URL    = "https://huggingface.co/datasets/iLearn-Lab/Finebadminton-20K"
 
 
 def _dir_has_files(directory: str) -> bool:
@@ -46,8 +46,41 @@ def _dir_has_files(directory: str) -> bool:
     return False
 
 
+def _get_latest_version(project) -> int:
+    """Return the highest available version number for a Roboflow project.
+
+    The SDK exposes project.versions() which returns a list of version objects,
+    each with a .version attribute (int).  If that call fails for any reason,
+    we fall back to probing versions 1-10 sequentially.
+    """
+    # Preferred: ask the SDK for all versions and take the max
+    try:
+        versions = project.versions()
+        if versions:
+            return max(int(v.version) for v in versions)
+    except Exception:
+        pass
+
+    # Fallback: probe version numbers until we hit one that works
+    for v in range(1, 11):
+        try:
+            project.version(v)   # raises if version doesn't exist
+            return v
+        except Exception:
+            continue
+
+    raise RuntimeError(
+        f"No published versions found for {ROBOFLOW_WORKSPACE}/{ROBOFLOW_PROJECT}. "
+        "Check the project URL in Roboflow Universe."
+    )
+
+
 def download_roboflow(api_key: str | None = None) -> None:
-    """Download Roboflow badminton-hehp8 dataset (COCO format)."""
+    """Download the latest published version of badminton-hehp8 (COCO format).
+
+    Version number is discovered at runtime rather than hardcoded, so this
+    works regardless of how many versions the project has published.
+    """
     target = ROBOFLOW_TRAIN_DIR
 
     if _dir_has_files(target):
@@ -61,17 +94,21 @@ def download_roboflow(api_key: str | None = None) -> None:
         try:
             from roboflow import Roboflow
 
-            os.makedirs(target, exist_ok=True)
-            rf = Roboflow(api_key=api_key)
+            rf      = Roboflow(api_key=api_key)
             project = rf.workspace(ROBOFLOW_WORKSPACE).project(ROBOFLOW_PROJECT)
-            dataset = project.version(ROBOFLOW_VERSION).download(
+
+            version_num = _get_latest_version(project)
+            print(f"[DOWNLOAD] Using Roboflow version {version_num}")
+
+            os.makedirs(target, exist_ok=True)
+            project.version(version_num).download(
                 ROBOFLOW_FORMAT,
                 location=target,
                 overwrite=False,
             )
             print(f"[DOWNLOAD] Roboflow dataset downloaded to: {target}")
         except ImportError:
-            print("[DOWNLOAD] 'roboflow' package not installed. Install with: pip install roboflow")
+            print("[DOWNLOAD] 'roboflow' package not installed.  pip install roboflow")
             _print_roboflow_manual()
         except Exception as e:
             print(f"[DOWNLOAD] Roboflow download failed: {e}")
