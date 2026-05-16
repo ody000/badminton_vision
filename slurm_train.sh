@@ -54,7 +54,7 @@ mkdir -p data/output/logs
 # OSCAR: load CUDA + cuDNN modules, then activate your conda/venv.
 # Uncomment and edit the lines that match your setup:
 #
-module load cuda/11.8.0 cudnn/8.6.0          # adjust versions as needed
+module load cuda/11.8.0-kuhf cudnn/8.7.0.84-11.8-kff3
 # module load python/3.10.12                    # if using OSCAR module python
 #
 # source ~/miniconda3/etc/profile.d/conda.sh    # conda (most common on OSCAR)

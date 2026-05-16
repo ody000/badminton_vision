@@ -35,7 +35,7 @@ mkdir -p data/output/logs
 
 # ── Activate environment ──────────────────────────────────────────────────────
 # Load CUDA + cuDNN modules (required for torch CUDA support)
-module load cuda/11.8.0 cudnn/8.6.0
+module load cuda/11.8.0-kuhf cudnn/8.7.0.84-11.8-kff3
 
 source .venv/bin/activate                     # plain venv alternative
 
