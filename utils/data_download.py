@@ -1,18 +1,36 @@
 """Dataset download utilities.
 
 Usage:
-    python utils/data_download.py --roboflow [--api-key KEY]
+    python utils/data_download.py --roboflow [--api-key KEY] [--rf-workspace WS] [--rf-project PROJ]
     python utils/data_download.py --finebadminton [--hf-dir /oscar/scratch/$USER/finebadminton20k]
     python utils/data_download.py --all
 
-Roboflow (player + shuttle detection, ~1 GB):
-    Downloads badminton-hehp8 dataset (COCO format) to data/input/train/.
+Roboflow (player + shuttle detection):
+    Downloads a badminton detection dataset (COCO format) to data/input/train/.
     Uses roboflow package if API key is provided; otherwise prints manual instructions.
     API key: the *private* key from your Roboflow account → Settings → API Keys.
 
+    Finding a working Roboflow dataset
+    -----------------------------------
+    The default workspace/project slug is a placeholder. To find a real dataset:
+      1. Go to https://universe.roboflow.com
+      2. Search "badminton" — filter by Object Detection, publicly available
+      3. Confirm a "Download Dataset" button exists on the project page
+      4. Copy the workspace and project slugs from the URL:
+           https://universe.roboflow.com/<workspace>/<project>
+      5. Pass them: --rf-workspace <workspace> --rf-project <project>
+
+    Known-good public alternatives (verify availability before use):
+      • badminton-shuttlecock  (shuttlecock only)
+          workspace: kj-wkp2y   project: shuttlecock-detection-cqp8u
+      • badminton-player-detection (players + shuttle)
+          Search "badminton player" on Universe; pick one with a Download button.
+
+    If a project has no Download button it is either private or has no published
+    version — you cannot download it via the API.
+
 FineBadminton20k (stroke classification, ~43 GB):
-    Source: HuggingFace — search for "finebadminton" or "FineBadminton20K" on
-            https://huggingface.co/datasets
+    Source: HuggingFace — https://huggingface.co/datasets/iLearn-Lab/Finebadminton-20K
     --hf-dir sets the local download target (default: data/input/finebadminton).
     On OSCAR this should be a /scratch path to avoid quota issues.
 
@@ -25,8 +43,11 @@ import argparse
 import os
 import sys
 
-ROBOFLOW_WORKSPACE = "badminton-rojkf"
-ROBOFLOW_PROJECT   = "badminton-hehp8"
+# ── Roboflow defaults ─────────────────────────────────────────────────────────
+# These are placeholders.  Override at runtime with --rf-workspace / --rf-project
+# (or find the correct slugs on https://universe.roboflow.com).
+ROBOFLOW_WORKSPACE = "badminton-rojkf"   # PLACEHOLDER — replace with a real slug
+ROBOFLOW_PROJECT   = "badminton-hehp8"   # PLACEHOLDER — replace with a real slug
 ROBOFLOW_FORMAT    = "coco"
 ROBOFLOW_TRAIN_DIR = "data/input/train"
 # Version is discovered automatically at runtime — do not hardcode.
@@ -75,12 +96,18 @@ def _get_latest_version(project) -> int:
     )
 
 
-def download_roboflow(api_key: str | None = None) -> None:
-    """Download the latest published version of badminton-hehp8 (COCO format).
+def download_roboflow(
+    api_key: str | None = None,
+    workspace: str | None = None,
+    project_slug: str | None = None,
+) -> None:
+    """Download the latest published version of a Roboflow badminton dataset (COCO format).
 
-    Version number is discovered at runtime rather than hardcoded, so this
-    works regardless of how many versions the project has published.
+    workspace and project_slug override the module-level defaults.
+    Version number is discovered at runtime.
     """
+    ws   = workspace     or ROBOFLOW_WORKSPACE
+    proj = project_slug  or ROBOFLOW_PROJECT
     target = ROBOFLOW_TRAIN_DIR
 
     if _dir_has_files(target):
@@ -90,12 +117,14 @@ def download_roboflow(api_key: str | None = None) -> None:
     if api_key is None:
         api_key = os.environ.get("ROBOFLOW_API_KEY")
 
+    print(f"[DOWNLOAD] Roboflow workspace='{ws}'  project='{proj}'")
+
     if api_key:
         try:
             from roboflow import Roboflow
 
             rf      = Roboflow(api_key=api_key)
-            project = rf.workspace(ROBOFLOW_WORKSPACE).project(ROBOFLOW_PROJECT)
+            project = rf.workspace(ws).project(proj)
 
             version_num = _get_latest_version(project)
             print(f"[DOWNLOAD] Using Roboflow version {version_num}")
@@ -109,24 +138,37 @@ def download_roboflow(api_key: str | None = None) -> None:
             print(f"[DOWNLOAD] Roboflow dataset downloaded to: {target}")
         except ImportError:
             print("[DOWNLOAD] 'roboflow' package not installed.  pip install roboflow")
-            _print_roboflow_manual()
+            _print_roboflow_manual(ws, proj)
         except Exception as e:
             print(f"[DOWNLOAD] Roboflow download failed: {e}")
-            _print_roboflow_manual()
+            _print_roboflow_manual(ws, proj)
     else:
         print("[DOWNLOAD] No API key provided.")
-        _print_roboflow_manual()
+        _print_roboflow_manual(ws, proj)
 
 
-def _print_roboflow_manual() -> None:
+def _print_roboflow_manual(workspace: str = ROBOFLOW_WORKSPACE,
+                            project: str = ROBOFLOW_PROJECT) -> None:
+    url = f"https://universe.roboflow.com/{workspace}/{project}"
     print(
-        "\n[DOWNLOAD] Manual Roboflow download instructions:\n"
-        "  1. Visit: https://universe.roboflow.com/badminton-rojkf/badminton-hehp8\n"
-        "  2. Click 'Download Dataset' → select 'COCO' format.\n"
-        f"  3. Extract the downloaded ZIP into: {os.path.abspath(ROBOFLOW_TRAIN_DIR)}/\n"
-        "     Expected layout:\n"
-        f"       {ROBOFLOW_TRAIN_DIR}/_annotations.coco.json\n"
-        f"       {ROBOFLOW_TRAIN_DIR}/<image_files>.jpg\n"
+        f"\n[DOWNLOAD] Manual Roboflow download instructions:\n"
+        f"  1. Confirm a working dataset exists — visit:\n"
+        f"       {url}\n"
+        f"     If there is NO 'Download Dataset' button, this project is private or\n"
+        f"     has no published version.  Search https://universe.roboflow.com for\n"
+        f"     'badminton' (filter: Object Detection, public) and find one that does.\n"
+        f"     Then re-run with:\n"
+        f"       python utils/data_download.py --roboflow \\\n"
+        f"           --api-key YOUR_KEY \\\n"
+        f"           --rf-workspace <workspace> \\\n"
+        f"           --rf-project  <project>\n"
+        f"\n"
+        f"  2. Or download manually:\n"
+        f"     a. Click 'Download Dataset' → select 'COCO' format.\n"
+        f"     b. Extract the ZIP into: {os.path.abspath(ROBOFLOW_TRAIN_DIR)}/\n"
+        f"        Expected layout:\n"
+        f"          {ROBOFLOW_TRAIN_DIR}/_annotations.coco.json\n"
+        f"          {ROBOFLOW_TRAIN_DIR}/<image_files>.jpg\n"
     )
 
 
@@ -220,6 +262,25 @@ def main() -> None:
         help="Roboflow private API key (or set ROBOFLOW_API_KEY env var).",
     )
     parser.add_argument(
+        "--rf-workspace",
+        dest="rf_workspace",
+        default=None,
+        help=(
+            "Roboflow workspace slug (the first path component in the Universe URL). "
+            "Overrides the module-level default. "
+            "Find a working public dataset at https://universe.roboflow.com"
+        ),
+    )
+    parser.add_argument(
+        "--rf-project",
+        dest="rf_project",
+        default=None,
+        help=(
+            "Roboflow project slug (the second path component in the Universe URL). "
+            "Overrides the module-level default."
+        ),
+    )
+    parser.add_argument(
         "--hf-dir",
         dest="hf_dir",
         default=None,
@@ -236,7 +297,11 @@ def main() -> None:
         sys.exit(1)
 
     if args.roboflow or args.all:
-        download_roboflow(api_key=args.api_key)
+        download_roboflow(
+            api_key=args.api_key,
+            workspace=args.rf_workspace,
+            project_slug=args.rf_project,
+        )
 
     if args.finebadminton or args.all:
         download_finebadminton(hf_dir=args.hf_dir)
