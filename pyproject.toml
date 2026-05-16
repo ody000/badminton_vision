@@ -5,9 +5,15 @@ description = "Badminton player/shuttle tracking and stroke classification pipel
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    # Core ML
-    "torch>=2.1.0",
-    "torchvision>=0.16.0",
+    # NOTE: torch and torchvision are intentionally excluded here.
+    # Install them separately with the correct CUDA wheel for your machine:
+    #
+    #   OSCAR (check CUDA version with: nvcc --version or nvidia-smi):
+    #     uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+    #
+    #   Mac (CPU only):
+    #     uv pip install torch torchvision
+    #
     "numpy>=1.24.0",
     "opencv-python-headless>=4.8.0",
     # Detection / tracking
@@ -25,15 +31,3 @@ dependencies = [
     # Viewer
     "dearpygui>=1.11.0",
 ]
-
-[tool.uv.sources]
-# Torch with CUDA — override on OSCAR with:
-#   uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-# or cu121 depending on the OSCAR CUDA version (check with: nvcc --version)
-torch = { index = "pytorch-cpu" }
-torchvision = { index = "pytorch-cpu" }
-
-[[tool.uv.indexes]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
