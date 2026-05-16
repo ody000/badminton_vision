@@ -3,7 +3,7 @@ name = "badminton-vision"
 version = "0.1.0"
 description = "Badminton player/shuttle tracking and stroke classification pipeline"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 dependencies = [
     # NOTE: torch and torchvision are intentionally excluded here.
     # Install them separately with the correct CUDA wheel for your machine:

@@ -40,6 +40,17 @@ else
     PYTHON="python"
 fi
 
+# Sanity-check: abort immediately if torch is missing rather than failing deep
+# inside a subprocess with a cryptic error.
+if ! ${PYTHON} -c "import torch" 2>/dev/null; then
+    echo "[SLURM_TRACK] ERROR: 'import torch' failed for PYTHON='${PYTHON}'"
+    echo "  Activate your conda/venv environment before submitting, or"
+    echo "  uncomment the module load / conda activate lines above."
+    exit 1
+fi
+echo "[SLURM_TRACK] torch OK — $(${PYTHON} -c 'import torch; print(torch.__version__)')"
+echo "[SLURM_TRACK] CUDA available: $(${PYTHON} -c 'import torch; print(torch.cuda.is_available())')"
+
 echo "[SLURM_TRACK] VIDEO_PATH=${VIDEO_PATH}"
 echo "[SLURM_TRACK] SHUTTLE_WEIGHTS=${SHUTTLE_WEIGHTS}"
 echo "[SLURM_TRACK] COURT_POINTS=${COURT_POINTS}"
