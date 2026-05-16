@@ -1,7 +1,39 @@
 [project]
 name = "badminton-vision"
 version = "0.1.0"
-description = "Add your description here"
+description = "Badminton player/shuttle tracking and stroke classification pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    # Core ML
+    "torch>=2.1.0",
+    "torchvision>=0.16.0",
+    "numpy>=1.24.0",
+    "opencv-python-headless>=4.8.0",
+    # Detection / tracking
+    "ultralytics>=8.0.0",          # YOLOv8
+    "scipy>=1.11.0",
+    # Pose / stroke classification
+    "mediapipe>=0.10.0",
+    # Dataset utilities
+    "roboflow>=1.1.0",
+    "huggingface-hub>=0.20.0",
+    "datasets>=2.16.0",
+    # Config / utilities
+    "pyyaml>=6.0",
+    "requests>=2.31.0",
+    # Viewer
+    "dearpygui>=1.11.0",
+]
+
+[tool.uv.sources]
+# Torch with CUDA — override on OSCAR with:
+#   uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# or cu121 depending on the OSCAR CUDA version (check with: nvcc --version)
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.indexes]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

@@ -57,8 +57,8 @@ mkdir -p data/output/logs
 #   module load cuda/11.8.0 cudnn/8.6.0          # adjust versions as needed
 #   module load python/3.10.12                    # if using OSCAR module python
 #
-source ~/miniconda3/etc/profile.d/conda.sh    # conda (most common on OSCAR)
-conda activate /users/zshen38/ulg_new_env                      # ← your env name here
+# source ~/miniconda3/etc/profile.d/conda.sh    # conda (most common on OSCAR)
+# conda activate /users/zshen38/ulg_new_env                      # ← your env name here
 #
 #   source .venv/bin/activate                     # plain venv alternative
 
