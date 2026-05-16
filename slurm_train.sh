@@ -54,8 +54,8 @@ mkdir -p data/output/logs
 # OSCAR: load CUDA + cuDNN modules, then activate your conda/venv.
 # Uncomment and edit the lines that match your setup:
 #
-cd "$(dirname "$(realpath "$0")")"  # Ensure we're in project root
-source .venv/bin/activate
+# Use absolute path to venv (required for compute nodes)
+source /users/zshen38/badminton_vision/.venv/bin/activate
 
 # Use uv run with verbose and unbuffered output flags (like slayminton)
 PYTHON="uv run -v python -u"
