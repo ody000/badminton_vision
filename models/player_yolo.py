@@ -1,42 +1,113 @@
-"""Player detection using YOLO."""
-from ultralytics import YOLO
+"""PlayerDetector: YOLOv8 + ByteTrack with MOG2 foreground confidence filter.
+
+Uses model.track() with persist=True for stable ByteTrack IDs.
+MOG2 filter is applied after mog2_warmup_frames to remove false positives.
+"""
+
+from __future__ import annotations
+
+import os
+
+import numpy as np
+
 
 class PlayerDetector:
-    def __init__(self, weights_path='yolov8n.pt', conf_threshold=0.5):
-        print(f"Loading YOLOv8 model from {weights_path} onto CPU...")
-        # Ultralytics will automatically download 'yolov8n.pt' from the internet 
-        # the very first time you run this, if it's not already in your folder.
-        self.model = YOLO(weights_path)
-        self.conf_threshold = conf_threshold
-        self.person_class_id = 0 # COCO dataset ID for 'person'
+    """Detect players using YOLOv8 + ByteTrack.
 
-    def detect(self, frame):
+    Args:
+        cfg: SimpleNamespace from load_config().
+        mog2_manager: MOG2Manager instance (shared with shuttle tracker).
+    """
+
+    def __init__(self, cfg=None, mog2_manager=None):
+        from ultralytics import YOLO
+
+        self.mog2 = mog2_manager
+        self.frame_count = 0
+
+        if cfg is not None:
+            weights = getattr(cfg, "player_weights", "weights/yolo_badminton.pt")
+            self.conf_threshold = float(getattr(cfg, "player_conf_threshold", 0.5))
+            self.warmup_frames = int(getattr(cfg, "mog2_warmup_frames", 150))
+            self.mog2_fg_thresh = float(getattr(cfg, "mog2_foreground_thresh_player", 0.06))
+            self.device = getattr(cfg, "device", "cpu")
+        else:
+            weights = "weights/yolo_badminton.pt"
+            self.conf_threshold = 0.5
+            self.warmup_frames = 150
+            self.mog2_fg_thresh = 0.06
+            self.device = "cpu"
+
+        # Fall back to yolov8n.pt if fine-tuned weights do not exist
+        if not os.path.exists(weights):
+            print(f"[YOLO] Weights not found at '{weights}', falling back to yolov8n.pt")
+            weights = "yolov8n.pt"
+
+        print(f"[YOLO] Loading model from {weights}")
+        self.model = YOLO(weights)
+
+    def detect(self, frame: np.ndarray) -> list[dict]:
+        """Run YOLOv8 + ByteTrack on a BGR frame.
+
+        Args:
+            frame: BGR numpy frame.
+
+        Returns:
+            List of dicts: {"id": int, "box": [x1,y1,x2,y2], "feet": (cx, y2), "feet_real": None}
         """
-        Runs inference and returns a list of bounding boxes for players.
-        Returns: List of [x1, y1, x2, y2] coordinates.
-        """
-        # Run YOLO on the frame. 
-        # device='cpu' forces it to use your Intel Mac CPU.
-        # verbose=False stops YOLO from spamming your terminal every single frame.
-        results = self.model.predict(
-            frame, 
-            classes=[self.person_class_id], 
-            conf=self.conf_threshold, 
-            device='cpu', 
-            verbose=False
+        self.frame_count += 1
+
+        results = self.model.track(
+            frame,
+            persist=True,
+            classes=[0],  # person only
+            conf=self.conf_threshold,
+            verbose=False,
         )
-        
-        player_boxes = []
-        for result in results:
-            # result.boxes.xyxy contains the [x1, y1, x2, y2] tensors
-            for box in result.boxes.xyxy:
-                # Convert the PyTorch tensor to a standard Python list of integers
-                x1, y1, x2, y2 = map(int, box.tolist())
-                
-                # Optional: Add logic here to filter out people sitting in the background
-                # (e.g., umpires or crowd) by checking if the foot coordinate (y2) 
-                # is within the bounds of your court homography matrix.
-                
-                player_boxes.append([x1, y1, x2, y2])
-                
-        return player_boxes
+
+        detections = []
+        if not results or results[0].boxes is None:
+            return detections
+
+        boxes_result = results[0].boxes
+        xyxy = boxes_result.xyxy.cpu().numpy() if hasattr(boxes_result.xyxy, "cpu") else np.array(boxes_result.xyxy)
+
+        # ByteTrack IDs (None before track has IDs)
+        if boxes_result.id is not None:
+            track_ids = boxes_result.id.cpu().numpy().astype(int)
+        else:
+            track_ids = list(range(len(xyxy)))
+
+        for i, box_arr in enumerate(xyxy):
+            x1, y1, x2, y2 = int(box_arr[0]), int(box_arr[1]), int(box_arr[2]), int(box_arr[3])
+            box = [x1, y1, x2, y2]
+            track_id = int(track_ids[i]) if i < len(track_ids) else i
+
+            # MOG2 filter: applied only after warmup
+            if (
+                self.mog2 is not None
+                and self.frame_count > self.warmup_frames
+            ):
+                fg_ratio = self.mog2.get_foreground_ratio(frame, box)
+                if fg_ratio < self.mog2_fg_thresh:
+                    continue
+
+            cx = (x1 + x2) // 2
+            feet = (cx, y2)
+
+            detections.append({
+                "id": track_id,
+                "box": box,
+                "feet": feet,
+                "feet_real": None,  # populated by main.py via CourtMapper
+            })
+
+        return detections
+
+    def update_mog2(self, frame: np.ndarray) -> None:
+        """Apply MOG2 to frame to update the background model.
+
+        Call this before detect() each frame.
+        """
+        if self.mog2 is not None:
+            self.mog2.apply(frame)

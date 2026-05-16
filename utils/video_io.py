@@ -1,89 +1,146 @@
-"""Video input/output utilities."""
-import cv2
+"""Video I/O helpers.
+
+Provides:
+  - VideoIOHandler: stream/write frames, get metadata
+  - extract_frames(): save JPG frames from a video
+"""
+
+from __future__ import annotations
+
 import os
-from collections import deque
+from typing import Generator, Tuple
+
+import cv2
+import numpy as np
+
 
 class VideoIOHandler:
-    def __init__(self, input_path, output_path, buffer_size=30):
-        # --- 1. Setup Reader ---
-        abs_input = os.path.abspath(input_path)
-        if not os.path.exists(abs_input):
-            raise FileNotFoundError(f"Cannot find input video at {abs_input}")
-            
-        self.cap = cv2.VideoCapture(abs_input)
-        self.fps = int(self.cap.get(cv2.CAP_PROP_FPS))
-        self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        print(f"Loaded video: {self.width}x{self.height} at {self.fps} FPS ({self.total_frames} frames)")
+    """Unified handler for reading and writing video files.
 
-        # --- 2. Setup Buffer ---
-        self.frame_buffer = deque(maxlen=buffer_size)
-        self.frame_count = 0
+    Args:
+        input_path: Path to input video file.
+        output_path: Optional path for output video. Writer opened lazily on first write_frame().
+    """
 
-        # --- 3. Setup Writer (The Brute-Force Fallback) ---
-        abs_output = os.path.abspath(output_path)
-        os.makedirs(os.path.dirname(abs_output), exist_ok=True)
-        
-        # Get the filename without the extension so we can test different ones
-        base_path, _ = os.path.splitext(abs_output)
-        
-        # Priority list of Mac codecs: 
-        # 1. H.264 (avc1) in MP4 
-        # 2. Standard MP4 (mp4v)
-        # 3. Apple QuickTime (mp4v in MOV container)
-        # 4. Motion JPEG (MJPG in AVI container)
-        codecs_to_try = [
-            ('avc1', '.mp4'),
-            ('mp4v', '.mp4'),
-            ('mp4v', '.mov'),
-            ('MJPG', '.avi')
-        ]
-        
-        self.writer = None
-        for codec_name, ext in codecs_to_try:
-            test_path = base_path + ext
-            fourcc = cv2.VideoWriter_fourcc(*codec_name)
-            
-            # Attempt to open the writer with the current codec
-            temp_writer = cv2.VideoWriter(test_path, fourcc, self.fps, (self.width, self.height))
-            
-            if temp_writer.isOpened():
-                self.writer = temp_writer
-                print(f"[VideoIO] Success! Using codec '{codec_name}' -> saving to {test_path}")
-                break
-            else:
-                print(f"[VideoIO] Mac rejected codec '{codec_name}'. Trying next...")
-                
-        if self.writer is None or not self.writer.isOpened():
-            raise Exception("CRITICAL: Your Mac rejected all standard video codecs. Check OpenCV installation.")
+    def __init__(self, input_path: str, output_path: str | None = None):
+        self.input_path = os.path.abspath(input_path)
+        self.output_path = output_path
+        self._writer: cv2.VideoWriter | None = None
+        self._fps: float | None = None
+        self._frame_count: int | None = None
+        self._frame_w: int | None = None
+        self._frame_h: int | None = None
 
-    def stream(self):
-        """Yields the current frame and frame number while maintaining the buffer."""
-        while self.cap.isOpened():
-            ret, frame = self.cap.read()
-            if not ret:
-                break
-                
-            self.frame_count += 1
-            self.frame_buffer.append(frame)
-            
-            yield frame, self.frame_count
+        # Open capture to read metadata eagerly.
+        cap = cv2.VideoCapture(self.input_path)
+        if not cap.isOpened():
+            raise FileNotFoundError(f"Cannot open video: {self.input_path}")
+        self._fps = float(cap.get(cv2.CAP_PROP_FPS)) or 30.0
+        self._frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self._frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self._frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
 
-    def get_recent_frames(self, count):
-        """Returns the last 'count' frames for sequence models."""
-        if len(self.frame_buffer) < count:
-            return None 
-        return list(self.frame_buffer)[-count:]
+    def get_fps(self) -> float:
+        return self._fps
 
-    def write_frame(self, processed_frame):
-        """Writes the annotated frame to the output video file."""
-        self.writer.write(processed_frame)
+    def get_frame_count(self) -> int:
+        return self._frame_count
 
-    def release(self):
-        """Cleans up the memory and finalizes the output file."""
-        self.cap.release()
-        if self.writer:
-            self.writer.release()
-        print("Video reading and writing closed successfully.")
+    def get_first_frame(self) -> np.ndarray:
+        """Return first frame as BGR numpy array."""
+        cap = cv2.VideoCapture(self.input_path)
+        ret, frame = cap.read()
+        cap.release()
+        if not ret or frame is None:
+            raise RuntimeError(f"Cannot read first frame from {self.input_path}")
+        return frame
+
+    def stream(self) -> Generator[Tuple[np.ndarray, int, float], None, None]:
+        """Generator yielding (frame_bgr, frame_idx, timestamp_s) tuples."""
+        cap = cv2.VideoCapture(self.input_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video for streaming: {self.input_path}")
+        fps = self._fps or 30.0
+        frame_idx = 0
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+                timestamp_s = frame_idx / fps
+                yield frame, frame_idx, timestamp_s
+                frame_idx += 1
+        finally:
+            cap.release()
+
+    def _ensure_writer(self, frame: np.ndarray) -> None:
+        if self._writer is not None:
+            return
+        if self.output_path is None:
+            raise RuntimeError("No output_path set on VideoIOHandler.")
+        out_abs = os.path.abspath(self.output_path)
+        os.makedirs(os.path.dirname(out_abs), exist_ok=True)
+        h, w = frame.shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        self._writer = cv2.VideoWriter(
+            out_abs,
+            fourcc,
+            self._fps or 30.0,
+            (w, h),
+        )
+
+    def write_frame(self, frame: np.ndarray) -> None:
+        """Write frame to output video. Opens writer on first call."""
+        self._ensure_writer(frame)
+        self._writer.write(frame)
+
+    def release(self) -> None:
+        """Flush and close output writer."""
+        if self._writer is not None:
+            self._writer.release()
+            self._writer = None
+
+
+def extract_frames(
+    video_path: str,
+    output_dir: str,
+    fps: float | None = None,
+) -> list[str]:
+    """Extract frames from video and save as numbered JPGs.
+
+    Args:
+        video_path: Source video path.
+        output_dir: Destination directory for extracted frames.
+        fps: If set, extract at this rate (subsample); otherwise extract every frame.
+
+    Returns:
+        List of absolute paths to saved JPG files.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    cap = cv2.VideoCapture(os.path.abspath(video_path))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Cannot open video: {video_path}")
+
+    source_fps = float(cap.get(cv2.CAP_PROP_FPS)) or 30.0
+    step = max(1, round(source_fps / fps)) if fps else 1
+
+    saved: list[str] = []
+    frame_idx = 0
+    saved_idx = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            break
+        if frame_idx % step == 0:
+            out_name = f"frame_{saved_idx:06d}.jpg"
+            out_path = os.path.join(output_dir, out_name)
+            cv2.imwrite(out_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            saved.append(os.path.abspath(out_path))
+            saved_idx += 1
+        frame_idx += 1
+
+    cap.release()
+    print(f"[VIDEO_IO] Extracted {len(saved)} frames to {output_dir}")
+    return saved

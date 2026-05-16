@@ -1,91 +1,211 @@
-"""Shuttle tracking using TrackNet."""
+"""TrackNetTracker - port from slayminton/models/tracknet.py with timestamp-aware buffer.
+
+Key additions vs slayminton:
+- Timestamp-aware buffer: flush if gap > 2 * (1/fps) between frames
+- White-pixel / MOG2 foreground filter for shuttle detections
+- set_fps() method
+- Accepts cfg (SimpleNamespace) for config-driven init
+"""
+
+from __future__ import annotations
+
+import os
 import cv2
 import numpy as np
 import torch
-import collections
-import os
 
-from models.TrackNet import TrackNet 
+from models.TrackNet import TrackNet
 
-class ShuttleTracker:
-    def __init__(self, weights_path="weights/track.pt", device=None):
-        self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = TrackNet().to(self.device)
-        self.input_buffer = collections.deque(maxlen=3)
-        self.sequence_length = 3
-        
-        # --- NEW FILTER VARIABLES ---
-        self.last_coord = None
-        self.frames_since_last_seen = 0
-        self.max_distance = 150  # Max pixels the bird can travel in 1 frame (adjust if needed)
-        self.reset_frames = 30   # If lost for 30 frames (~0.5 sec), allow picking it up anywhere
-        # ----------------------------
 
-        state_dict = torch.load(weights_path, map_location=self.device)
-        self.model.load_state_dict(state_dict, strict=True)
-        self.model.eval()
+class TrackNetTracker:
+    """Lightweight wrapper around TrackNet for a detect(frame, timestamp) API.
 
-    def _preprocess(self):
-        stacked_frames = []
-        for frame in self.input_buffer:
-            resized = cv2.resize(frame, (512, 288))
-            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-            normalized = rgb.astype(np.float32) / 255.0
-            transposed = np.transpose(normalized, (2, 0, 1))
-            stacked_frames.append(transposed)
-            
-        # Concatenate the 3 frames (3 frames * 3 channels = 9 channels)
-        concatenated = np.concatenate(stacked_frames, axis=0)
-        tensor = torch.tensor(concatenated, dtype=torch.float32).unsqueeze(0).to(self.device)
-        return tensor
+    Assumptions/behavior:
+    - Maintains a timestamp-aware buffer of (timestamp, frame) tuples (maxlen 3).
+    - If gap between consecutive timestamps > 2 * (1/fps), buffer is flushed.
+    - Loads checkpoint by inspecting the final conv layer weight shape for out_channels.
+    - Resizes input frames to (expected_h, expected_w) before inference.
+    - Returns {"shuttle": (timestamp, x, y, w, h)} or {} if confidence < threshold.
+    """
 
-    def update(self, frame):
-        import math # Make sure math is imported at the top of your file!
-        
-        original_height, original_width = frame.shape[:2]
-        self.input_buffer.append(frame)
-        
-        if len(self.input_buffer) < self.sequence_length:
-            return None 
-            
-        input_tensor = self._preprocess()
-        
-        with torch.no_grad():
-            heatmap_tensor = self.model(input_tensor)
-            
-        heatmap = heatmap_tensor[0, 2, :, :].cpu().numpy() 
-        raw_coords = self._get_center_from_heatmap(heatmap, original_width, original_height)
-        
-        # --- THE PHYSICS FILTER ---
-        if raw_coords is not None:
-            if self.last_coord is None or self.frames_since_last_seen > self.reset_frames:
-                # First time seeing it, or we lost it for a while. Accept it blindly.
-                self.last_coord = raw_coords
-                self.frames_since_last_seen = 0
-                return raw_coords
-            else:
-                # We saw it recently. Check the distance!
-                dist = math.dist(self.last_coord, raw_coords)
-                if dist <= self.max_distance:
-                    # It's a valid physics move! Update memory.
-                    self.last_coord = raw_coords
-                    self.frames_since_last_seen = 0
-                    return raw_coords
-                else:
-                    # It teleported! This is a white shoe/line. Reject it.
-                    self.frames_since_last_seen += 1
-                    return None 
+    def __init__(
+        self,
+        cfg=None,
+        weights_path: str | None = None,
+        device: str = "cpu",
+        box_size: int = 16,
+        conf_threshold: float = 0.001,
+        expected_h: int = 288,
+        expected_w: int = 512,
+        fps: float = 30.0,
+        mog2_manager=None,
+    ):
+        # Read params from cfg if provided, use explicit args as overrides.
+        if cfg is not None:
+            weights_path = weights_path or getattr(cfg, "tracknet_weights", "weights/tracknet.pt")
+            device = device or getattr(cfg, "device", "cpu")
+            box_size = int(getattr(cfg, "tracknet_box_size", box_size))
+            conf_threshold = float(getattr(cfg, "tracknet_conf_threshold", conf_threshold))
+            expected_h = int(getattr(cfg, "tracknet_expected_h", expected_h))
+            expected_w = int(getattr(cfg, "tracknet_expected_w", expected_w))
+            fps = float(getattr(cfg, "fps", fps))
+
+        self.device = torch.device(
+            device if isinstance(device, str) else ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        self.box_size = int(box_size)
+        self.conf_threshold = float(conf_threshold)
+        self.expected_size = (int(expected_h), int(expected_w))  # (H, W)
+        self.fps = float(fps)
+        self.mog2_manager = mog2_manager
+        self.mog2_foreground_thresh = (
+            float(getattr(cfg, "mog2_foreground_thresh_shuttle", 0.05)) if cfg else 0.05
+        )
+        self.warmup_frames = int(getattr(cfg, "mog2_warmup_frames", 150)) if cfg else 150
+        self._frame_count = 0
+
+        # Timestamp-aware buffer: list of (timestamp, frame_rgb)
+        self._buffer: list[tuple[float, np.ndarray]] = []
+
+        # Determine out_channels from checkpoint.
+        out_ch = 1
+        state = None
+        if weights_path and os.path.exists(weights_path):
+            try:
+                state = torch.load(weights_path, map_location="cpu")
+                sd = state.get("state_dict", state) if isinstance(state, dict) else state
+                for key in reversed(list(sd.keys())):
+                    if isinstance(sd[key], torch.Tensor) and sd[key].ndim == 4:
+                        out_ch = int(sd[key].shape[0])
+                        break
+                print(f"[TRACKNET] Loaded checkpoint suggests out_channels={out_ch}")
+            except Exception as e:
+                print(f"[TRACKNET] Warning: failed to inspect weights ({e}), using default out_channels=1")
+
+        self.model = TrackNet(out_channels=out_ch)
+        if state is not None:
+            try:
+                sd = state.get("state_dict", state) if isinstance(state, dict) else state
+                self.model.load_state_dict(sd, strict=False)
+                print(f"[TRACKNET] Loaded weights from {weights_path}")
+            except Exception as e:
+                print(f"[TRACKNET] Warning: failed to load weights ({e}), using random init")
         else:
-            # TrackNet saw nothing.
-            self.frames_since_last_seen += 1
-            return None
+            if weights_path:
+                print(f"[TRACKNET] Warning: weights not found at {weights_path}; using random init")
 
-    def _get_center_from_heatmap(self, heatmap, orig_w, orig_h):
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(heatmap)
-        if max_val > 0.5:
-            pred_x, pred_y = max_loc
-            scaled_x = int(pred_x * (orig_w / 512.0))
-            scaled_y = int(pred_y * (orig_h / 288.0))
-            return (scaled_x, scaled_y)
-            
-        return None
+        self.model.to(self.device).eval()
+
+    def set_fps(self, fps: float) -> None:
+        """Update the fps used for timestamp-gap flush detection."""
+        self.fps = float(fps)
+
+    def _flush_buffer(self) -> None:
+        self._buffer.clear()
+
+    def _maybe_flush_for_gap(self, timestamp: float) -> None:
+        """Flush buffer if gap between new timestamp and last buffered is > 2*(1/fps)."""
+        if not self._buffer:
+            return
+        last_ts = self._buffer[-1][0]
+        gap_threshold = 2.0 / max(self.fps, 1e-6)
+        if (timestamp - last_ts) > gap_threshold:
+            self._flush_buffer()
+
+    def _preprocess(self, frames: list[np.ndarray]) -> torch.Tensor:
+        """Stack 3 RGB frames into 9-channel tensor."""
+        arrays = []
+        for f in frames:
+            img = f.astype(np.float32) / 255.0
+            chw = np.transpose(img, (2, 0, 1))  # H,W,C -> C,H,W
+            arrays.append(chw)
+        stacked = np.concatenate(arrays, axis=0)  # 9 x H x W
+        return torch.from_numpy(stacked).unsqueeze(0).to(self.device)
+
+    def _postprocess_heatmap(
+        self, heatmap: np.ndarray, frame_w: int, frame_h: int
+    ) -> tuple[int, int, int, int, float]:
+        """Find argmax of heatmap and return bounding box + confidence.
+
+        Returns (x0, y0, w, h, conf).
+        """
+        eh, ew = self.expected_size
+        if heatmap.shape[0] != frame_h or heatmap.shape[1] != frame_w:
+            heatmap = cv2.resize(heatmap, (frame_w, frame_h))
+        _, maxv, _, maxloc = cv2.minMaxLoc(heatmap.astype(np.float32))
+        cx, cy = int(maxloc[0]), int(maxloc[1])
+        half = self.box_size // 2
+        x0 = max(0, cx - half)
+        y0 = max(0, cy - half)
+        w = min(self.box_size, frame_w - x0)
+        h = min(self.box_size, frame_h - y0)
+        return x0, y0, w, h, float(maxv)
+
+    def detect(self, frame: np.ndarray, timestamp: float = 0.0) -> dict:
+        """Run TrackNet on one BGR frame and return detection dict.
+
+        Args:
+            frame: BGR frame (numpy uint8).
+            timestamp: Frame timestamp in seconds.
+
+        Returns:
+            {"shuttle": (timestamp, x, y, w, h)} or {}.
+        """
+        self._frame_count += 1
+
+        # Convert BGR to RGB for model
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w = frame_rgb.shape[:2]
+
+        # Flush buffer if large timestamp gap
+        self._maybe_flush_for_gap(timestamp)
+
+        # Append to buffer
+        self._buffer.append((timestamp, frame_rgb))
+        if len(self._buffer) > 3:
+            self._buffer.pop(0)
+
+        # Build 3-frame input (replicate if not enough frames yet)
+        if len(self._buffer) < 3:
+            frames_for_model = [frame_rgb] * 3
+        else:
+            frames_for_model = [entry[1] for entry in self._buffer]
+
+        # Resize to expected model resolution
+        eh, ew = self.expected_size
+        if (h, w) != (eh, ew):
+            resized = [cv2.resize(f, (ew, eh)) for f in frames_for_model]
+        else:
+            resized = frames_for_model
+
+        inp = self._preprocess(resized)
+        with torch.no_grad():
+            out = self.model(inp)
+            out_np = out.squeeze(0).cpu().numpy()
+
+        heat = out_np[0] if out_np.ndim == 3 else out_np
+
+        x0, y0, bw, bh, conf = self._postprocess_heatmap(heat, w, h)
+
+        if conf < self.conf_threshold:
+            return {}
+
+        # MOG2 white-pixel filter (only after warmup)
+        if (
+            self.mog2_manager is not None
+            and self._frame_count > self.warmup_frames
+        ):
+            box = [x0, y0, x0 + bw, y0 + bh]
+            fg_ratio = self.mog2_manager.get_foreground_ratio(frame, box)
+            if fg_ratio < self.mog2_foreground_thresh:
+                return {}
+
+        return {
+            "shuttle": (
+                float(timestamp),
+                float(x0),
+                float(y0),
+                float(bw),
+                float(bh),
+            )
+        }

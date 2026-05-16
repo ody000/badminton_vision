@@ -1,11 +1,12 @@
-/data/input/*.mp4
-/data/input/*.avi
-/data/input/*.mkv
-/data/input/*.mov
-/data/output/*.mp4
-/data/output/*.avi
-/data/output/*.mkv
-/data/output/*.mov
+/data/input
+/data/output
 
-*.pt
-*.npy
+AGENTS.md
+PRD.md
+ISSUES.md
+*/__pycache__
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+.venv/
