@@ -51,11 +51,35 @@ WEIGHTS="${WEIGHTS:-}"
 mkdir -p data/output/logs
 
 # ── Activate environment ──────────────────────────────────────────────────────
+# OSCAR: load CUDA + cuDNN modules, then activate your conda/venv.
+# Uncomment and edit the lines that match your setup:
+#
+#   module load cuda/11.8.0 cudnn/8.6.0          # adjust versions as needed
+#   module load python/3.10.12                    # if using OSCAR module python
+#
+source ~/miniconda3/etc/profile.d/conda.sh    # conda (most common on OSCAR)
+conda activate /users/zshen38/ulg_new_env                      # ← your env name here
+#
+#   source .venv/bin/activate                     # plain venv alternative
+
+# After activation, set PYTHON to whatever interpreter has torch installed.
+# uv run python is tried first; falls back to plain python.
 if command -v uv &>/dev/null; then
     PYTHON="uv run python"
 else
     PYTHON="python"
 fi
+
+# Sanity-check: abort immediately if torch is missing rather than failing deep
+# inside a torchrun subprocess with a cryptic error.
+if ! ${PYTHON} -c "import torch" 2>/dev/null; then
+    echo "[SLURM] ERROR: 'import torch' failed for PYTHON='${PYTHON}'"
+    echo "  Activate your conda/venv environment before submitting, or"
+    echo "  uncomment the module load / conda activate lines above."
+    exit 1
+fi
+echo "[SLURM] torch OK — $(${PYTHON} -c 'import torch; print(torch.__version__)')"
+echo "[SLURM] CUDA available: $(${PYTHON} -c 'import torch; print(torch.cuda.is_available())')"
 
 echo "[SLURM] MODE=${MODE} NGPUS=${NGPUS} JOB_ID=${SLURM_JOB_ID}"
 echo "[SLURM] Starting at $(date)"
@@ -65,7 +89,7 @@ case "${MODE}" in
 
     train-tracknet)
         echo "[SLURM] Training TrackNet"
-        torchrun \
+        ${PYTHON} -m torch.distributed.run \
             --nproc_per_node="${NGPUS}" \
             training/train_tracknet.py \
             --config config.yaml \
@@ -81,7 +105,7 @@ case "${MODE}" in
 
     train-yolo)
         echo "[SLURM] Training YOLO"
-        torchrun \
+        ${PYTHON} -m torch.distributed.run \
             --nproc_per_node="${NGPUS}" \
             training/train_yolo.py \
             --config config.yaml \
@@ -100,7 +124,7 @@ case "${MODE}" in
         #   sbatch --export=MODE=train-stroke,FINEBADMINTON_DIR=/path/to/data slurm_train.sh
         _FB_DIR="${FINEBADMINTON_DIR:-/oscar/scratch/${USER}/finebadminton20k}"
         echo "[SLURM] FINEBADMINTON_DIR=${_FB_DIR}"
-        torchrun \
+        ${PYTHON} -m torch.distributed.run \
             --nproc_per_node="${NGPUS}" \
             training/train_stroke.py \
             --config config.yaml \
