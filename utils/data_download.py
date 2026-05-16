@@ -1,36 +1,50 @@
 """Dataset download utilities.
 
 Usage:
-    python utils/data_download.py --roboflow [--api-key KEY] [--rf-workspace WS] [--rf-project PROJ]
-    python utils/data_download.py --finebadminton [--hf-dir /oscar/scratch/$USER/finebadminton20k]
-    python utils/data_download.py --all
+    # Single Roboflow dataset
+    python utils/data_download.py --roboflow \\
+        --api-key KEY \\
+        --rf-dataset workspace/project
+
+    # Multiple Roboflow datasets merged into one training dir
+    python utils/data_download.py --roboflow \\
+        --api-key KEY \\
+        --rf-dataset workspace1/project1 \\
+        --rf-dataset workspace2/project2
+
+    # FineBadminton20k stroke classifier dataset
+    python utils/data_download.py --finebadminton \\
+        [--hf-dir /oscar/scratch/$USER/finebadminton20k]
+
+    # Both
+    python utils/data_download.py --all --api-key KEY \\
+        --rf-dataset workspace1/project1 \\
+        --rf-dataset workspace2/project2
 
 Roboflow (player + shuttle detection):
-    Downloads a badminton detection dataset (COCO format) to data/input/train/.
-    Uses roboflow package if API key is provided; otherwise prints manual instructions.
+    Each --rf-dataset entry is downloaded to data/input/roboflow/<project>/.
+    After all downloads finish, all COCO datasets are merged into
+    data/input/train/ (images + a single _annotations.coco.json).
     API key: the *private* key from your Roboflow account → Settings → API Keys.
 
-    Finding a working Roboflow dataset
+    Finding working Roboflow datasets
     -----------------------------------
-    The default workspace/project slug is a placeholder. To find a real dataset:
-      1. Go to https://universe.roboflow.com
-      2. Search "badminton" — filter by Object Detection, publicly available
-      3. Confirm a "Download Dataset" button exists on the project page
-      4. Copy the workspace and project slugs from the URL:
-           https://universe.roboflow.com/<workspace>/<project>
-      5. Pass them: --rf-workspace <workspace> --rf-project <project>
+    1. Go to https://universe.roboflow.com
+    2. Search "badminton" or "shuttlecock" — filter Object Detection, Public
+    3. Confirm a "Download Dataset" button exists (= published version available)
+    4. Copy slugs from the URL: universe.roboflow.com/<workspace>/<project>
+    5. Pass as: --rf-dataset <workspace>/<project>
 
-    Known-good public alternatives (verify availability before use):
-      • badminton-shuttlecock  (shuttlecock only)
-          workspace: kj-wkp2y   project: shuttlecock-detection-cqp8u
-      • badminton-player-detection (players + shuttle)
-          Search "badminton player" on Universe; pick one with a Download button.
+    If a project has no Download button it is private or has no published version.
 
-    If a project has no Download button it is either private or has no published
-    version — you cannot download it via the API.
+    Category normalisation:
+    Common shuttle label variants ("shuttle", "bird", "cock", "feather") are
+    remapped to "shuttlecock".  Player variants ("person", "athlete",
+    "badminton_player", "badminton-player") are remapped to "player".
+    Everything else keeps its original name.
 
 FineBadminton20k (stroke classification, ~43 GB):
-    Source: HuggingFace — https://huggingface.co/datasets/iLearn-Lab/Finebadminton-20K
+    Source: https://huggingface.co/datasets/iLearn-Lab/Finebadminton-20K
     --hf-dir sets the local download target (default: data/input/finebadminton).
     On OSCAR this should be a /scratch path to avoid quota issues.
 
@@ -40,22 +54,48 @@ Both: skip if target directory already has files (idempotent).
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import shutil
 import sys
+from pathlib import Path
+from typing import List, Tuple
 
-# ── Roboflow defaults ─────────────────────────────────────────────────────────
-# These are placeholders.  Override at runtime with --rf-workspace / --rf-project
-# (or find the correct slugs on https://universe.roboflow.com).
-ROBOFLOW_WORKSPACE = "badminton-rojkf"   # PLACEHOLDER — replace with a real slug
-ROBOFLOW_PROJECT   = "badminton-hehp8"   # PLACEHOLDER — replace with a real slug
-ROBOFLOW_FORMAT    = "coco"
-ROBOFLOW_TRAIN_DIR = "data/input/train"
-# Version is discovered automatically at runtime — do not hardcode.
+# ── Roboflow constants ────────────────────────────────────────────────────────
+ROBOFLOW_FORMAT     = "coco"
+ROBOFLOW_RAW_DIR    = "data/input/roboflow"   # per-project subdirs live here
+ROBOFLOW_TRAIN_DIR  = "data/input/train"       # merged output
 
-FINEBADMINTON_DIR    = "data/input/finebadminton"
-FINEBADMINTON_HF_ID  = "iLearn-Lab/Finebadminton-20K"   # confirm on HuggingFace before use
-FINEBADMINTON_URL    = "https://huggingface.co/datasets/iLearn-Lab/Finebadminton-20K"
+# Category normalisation map — keys are lower-cased source names.
+# Add more aliases here as needed.
+CATEGORY_REMAP: dict[str, str] = {
+    # shuttlecock aliases
+    "shuttle":           "shuttlecock",
+    "shuttlecock":       "shuttlecock",
+    "bird":              "shuttlecock",
+    "cock":              "shuttlecock",
+    "feather":           "shuttlecock",
+    "feathercock":       "shuttlecock",
+    "badminton_shuttle": "shuttlecock",
+    "badminton-shuttle": "shuttlecock",
+    # player aliases
+    "person":                "player",
+    "player":                "player",
+    "athlete":               "player",
+    "badminton_player":      "player",
+    "badminton-player":      "player",
+    "badminton player":      "player",
+}
 
+# ── FineBadminton constants ───────────────────────────────────────────────────
+FINEBADMINTON_DIR   = "data/input/finebadminton"
+FINEBADMINTON_HF_ID = "iLearn-Lab/Finebadminton-20K"
+FINEBADMINTON_URL   = "https://huggingface.co/datasets/iLearn-Lab/Finebadminton-20K"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _dir_has_files(directory: str) -> bool:
     """Return True if directory exists and contains at least one file."""
@@ -67,110 +107,412 @@ def _dir_has_files(directory: str) -> bool:
     return False
 
 
-def _get_latest_version(project) -> int:
-    """Return the highest available version number for a Roboflow project.
+VALID_TYPES = {"shuttle", "player"}
 
-    The SDK exposes project.versions() which returns a list of version objects,
-    each with a .version attribute (int).  If that call fails for any reason,
-    we fall back to probing versions 1-10 sequentially.
+def _parse_rf_dataset(spec: str) -> Tuple[str, str, str | None]:
+    """Parse 'workspace/project[:type]' into (workspace, project, type).
+
+    type must be one of: shuttle, player  (or omitted → None, goes to data/input/train/).
+    Examples:
+      ws/shuttle-ds:shuttle   → type='shuttle' → merged into data/input/train/shuttle/
+      ws/player-ds:player     → type='player'  → merged into data/input/train/player/
+      ws/mixed-ds             → type=None       → merged into data/input/train/
     """
-    # Preferred: ask the SDK for all versions and take the max
+    # Split off optional :type suffix
+    if ":" in spec:
+        ws_proj, dtype = spec.rsplit(":", 1)
+        dtype = dtype.lower().strip()
+        if dtype not in VALID_TYPES:
+            raise argparse.ArgumentTypeError(
+                f"Unknown dataset type {dtype!r}. Valid types: {sorted(VALID_TYPES)}"
+            )
+    else:
+        ws_proj = spec
+        dtype = None
+
+    parts = ws_proj.strip().split("/", 1)
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError(
+            f"--rf-dataset must be in 'workspace/project[:type]' form, got: {spec!r}"
+        )
+    return parts[0], parts[1], dtype
+
+
+def _get_latest_version(project) -> int:
+    """Return the highest available version number for a Roboflow project."""
     try:
         versions = project.versions()
         if versions:
             return max(int(v.version) for v in versions)
     except Exception:
         pass
-
-    # Fallback: probe version numbers until we hit one that works
     for v in range(1, 11):
         try:
-            project.version(v)   # raises if version doesn't exist
+            project.version(v)
             return v
         except Exception:
             continue
-
     raise RuntimeError(
-        f"No published versions found for {ROBOFLOW_WORKSPACE}/{ROBOFLOW_PROJECT}. "
-        "Check the project URL in Roboflow Universe."
+        f"No published versions found for this project. "
+        "Ensure the project has a published version and a Download button on Universe."
     )
 
 
-def download_roboflow(
-    api_key: str | None = None,
-    workspace: str | None = None,
-    project_slug: str | None = None,
-) -> None:
-    """Download the latest published version of a Roboflow badminton dataset (COCO format).
+# ─────────────────────────────────────────────────────────────────────────────
+# Single-dataset Roboflow download
+# ─────────────────────────────────────────────────────────────────────────────
 
-    workspace and project_slug override the module-level defaults.
-    Version number is discovered at runtime.
+def _download_one_roboflow(
+    api_key: str,
+    workspace: str,
+    project_slug: str,
+) -> str | None:
+    """Download one Roboflow dataset to data/input/roboflow/<project_slug>/.
+
+    Returns the local directory path on success, None on failure.
     """
-    ws   = workspace     or ROBOFLOW_WORKSPACE
-    proj = project_slug  or ROBOFLOW_PROJECT
-    target = ROBOFLOW_TRAIN_DIR
+    target = os.path.join(ROBOFLOW_RAW_DIR, project_slug)
 
     if _dir_has_files(target):
-        print(f"[DOWNLOAD] Roboflow dataset already present at '{target}' — skipping.")
-        return
+        print(f"[DOWNLOAD] '{workspace}/{project_slug}' already present at '{target}' — skipping.")
+        return target
 
-    if api_key is None:
-        api_key = os.environ.get("ROBOFLOW_API_KEY")
+    print(f"[DOWNLOAD] Downloading Roboflow workspace='{workspace}'  project='{project_slug}'")
+    try:
+        from roboflow import Roboflow
 
-    print(f"[DOWNLOAD] Roboflow workspace='{ws}'  project='{proj}'")
+        rf      = Roboflow(api_key=api_key)
+        project = rf.workspace(workspace).project(project_slug)
 
-    if api_key:
-        try:
-            from roboflow import Roboflow
+        version_num = _get_latest_version(project)
+        print(f"[DOWNLOAD]   → version {version_num}")
 
-            rf      = Roboflow(api_key=api_key)
-            project = rf.workspace(ws).project(proj)
-
-            version_num = _get_latest_version(project)
-            print(f"[DOWNLOAD] Using Roboflow version {version_num}")
-
-            os.makedirs(target, exist_ok=True)
-            project.version(version_num).download(
-                ROBOFLOW_FORMAT,
-                location=target,
-                overwrite=False,
-            )
-            print(f"[DOWNLOAD] Roboflow dataset downloaded to: {target}")
-        except ImportError:
-            print("[DOWNLOAD] 'roboflow' package not installed.  pip install roboflow")
-            _print_roboflow_manual(ws, proj)
-        except Exception as e:
-            print(f"[DOWNLOAD] Roboflow download failed: {e}")
-            _print_roboflow_manual(ws, proj)
-    else:
-        print("[DOWNLOAD] No API key provided.")
-        _print_roboflow_manual(ws, proj)
+        os.makedirs(target, exist_ok=True)
+        project.version(version_num).download(
+            ROBOFLOW_FORMAT,
+            location=target,
+            overwrite=False,
+        )
+        print(f"[DOWNLOAD]   → saved to: {target}")
+        return target
+    except ImportError:
+        print("[DOWNLOAD] 'roboflow' package not installed.  pip install roboflow")
+        _print_roboflow_manual(workspace, project_slug)
+        return None
+    except Exception as e:
+        print(f"[DOWNLOAD] Failed ({workspace}/{project_slug}): {e}")
+        _print_roboflow_manual(workspace, project_slug)
+        return None
 
 
-def _print_roboflow_manual(workspace: str = ROBOFLOW_WORKSPACE,
-                            project: str = ROBOFLOW_PROJECT) -> None:
+def _print_roboflow_manual(workspace: str, project: str) -> None:
     url = f"https://universe.roboflow.com/{workspace}/{project}"
     print(
-        f"\n[DOWNLOAD] Manual Roboflow download instructions:\n"
-        f"  1. Confirm a working dataset exists — visit:\n"
+        f"\n[DOWNLOAD] Manual download instructions for {workspace}/{project}:\n"
+        f"  1. Confirm a Download button exists at:\n"
         f"       {url}\n"
-        f"     If there is NO 'Download Dataset' button, this project is private or\n"
+        f"     If there is NO 'Download Dataset' button, the project is private or\n"
         f"     has no published version.  Search https://universe.roboflow.com for\n"
-        f"     'badminton' (filter: Object Detection, public) and find one that does.\n"
-        f"     Then re-run with:\n"
-        f"       python utils/data_download.py --roboflow \\\n"
-        f"           --api-key YOUR_KEY \\\n"
-        f"           --rf-workspace <workspace> \\\n"
-        f"           --rf-project  <project>\n"
+        f"     a public alternative and pass it via --rf-dataset workspace/project.\n"
         f"\n"
         f"  2. Or download manually:\n"
         f"     a. Click 'Download Dataset' → select 'COCO' format.\n"
-        f"     b. Extract the ZIP into: {os.path.abspath(ROBOFLOW_TRAIN_DIR)}/\n"
+        f"     b. Extract the ZIP into:\n"
+        f"          {os.path.abspath(os.path.join(ROBOFLOW_RAW_DIR, project))}/\n"
         f"        Expected layout:\n"
-        f"          {ROBOFLOW_TRAIN_DIR}/_annotations.coco.json\n"
-        f"          {ROBOFLOW_TRAIN_DIR}/<image_files>.jpg\n"
+        f"          {ROBOFLOW_RAW_DIR}/{project}/_annotations.coco.json\n"
+        f"          {ROBOFLOW_RAW_DIR}/{project}/<image_files>.jpg\n"
     )
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COCO merge
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _find_coco_json(directory: str) -> str | None:
+    """Find the COCO annotation JSON inside a Roboflow download directory.
+
+    Roboflow SDK nests downloads like:
+      <location>/<ProjectName>-<version>/train/_annotations.coco.json
+    or (simpler layout):
+      <location>/train/_annotations.coco.json
+    or directly:
+      <location>/_annotations.coco.json
+
+    We always prefer the 'train' split over 'valid'/'test'.
+    """
+    # Priority 1: direct or explicit train/ paths
+    candidates = [
+        os.path.join(directory, "_annotations.coco.json"),
+        os.path.join(directory, "train", "_annotations.coco.json"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+
+    # Priority 2: walk entire subtree — collect all annotation JSONs,
+    # prefer any path whose parent directory is named 'train'.
+    found: list[str] = []
+    for root, dirs, files in os.walk(directory):
+        # Skip valid/test splits so we don't accidentally use them
+        dirs[:] = [d for d in dirs if d not in ("valid", "test", "validation")]
+        for f in files:
+            if f.endswith(".json") and "annotation" in f.lower():
+                found.append(os.path.join(root, f))
+
+    if not found:
+        return None
+
+    # Prefer whichever path contains 'train' in its directory components
+    for p in found:
+        if "train" in Path(p).parts:
+            return p
+    return found[0]
+
+
+def _normalise_category_name(name: str) -> str:
+    return CATEGORY_REMAP.get(name.lower().strip(), name.lower().strip())
+
+
+def merge_coco_datasets(source_dirs: List[str], output_dir: str) -> None:
+    """Merge multiple COCO-format directories into a single output_dir.
+
+    Strategy:
+    - Unified category list, normalised names (e.g. "shuttle" → "shuttlecock")
+    - Images copied to output_dir/ with dataset prefix to avoid name collisions
+    - Image IDs and annotation IDs re-mapped to be globally unique
+    - Writes output_dir/_annotations.coco.json
+    """
+    if _dir_has_files(output_dir):
+        print(f"[MERGE] '{output_dir}' already has files — skipping merge.")
+        print(f"        Delete it to force a re-merge.")
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # ── Pass 1: collect all unique normalised category names ──────────────────
+    all_category_names: list[str] = []
+    seen_names: set[str] = set()
+    for src_dir in source_dirs:
+        ann_path = _find_coco_json(src_dir)
+        if ann_path is None:
+            print(f"[MERGE] WARNING: No COCO JSON found in '{src_dir}' — skipping.")
+            continue
+        with open(ann_path) as f:
+            data = json.load(f)
+        for cat in data.get("categories", []):
+            norm = _normalise_category_name(cat["name"])
+            if norm not in seen_names:
+                seen_names.add(norm)
+                all_category_names.append(norm)
+
+    if not all_category_names:
+        print("[MERGE] No valid COCO datasets found — nothing to merge.")
+        return
+
+    # Assign stable category IDs (sorted for determinism)
+    all_category_names.sort()
+    unified_categories = [
+        {"id": i + 1, "name": name, "supercategory": "none"}
+        for i, name in enumerate(all_category_names)
+    ]
+    cat_name_to_id = {c["name"]: c["id"] for c in unified_categories}
+
+    print(f"[MERGE] Unified categories: {all_category_names}")
+
+    # ── Pass 2: merge images + annotations ───────────────────────────────────
+    merged_images: list[dict] = []
+    merged_annotations: list[dict] = []
+    global_image_id = 1
+    global_ann_id   = 1
+
+    for src_dir in source_dirs:
+        ann_path = _find_coco_json(src_dir)
+        if ann_path is None:
+            continue
+
+        src_name  = Path(src_dir).name   # used as filename prefix
+        image_dir = os.path.dirname(ann_path)
+
+        with open(ann_path) as f:
+            data = json.load(f)
+
+        # Build per-source category remap: old_id → unified_id
+        src_cat_remap: dict[int, int] = {}
+        for cat in data.get("categories", []):
+            norm = _normalise_category_name(cat["name"])
+            if norm in cat_name_to_id:
+                src_cat_remap[cat["id"]] = cat_name_to_id[norm]
+
+        # Remap images
+        src_image_remap: dict[int, int] = {}   # old_id → new_id
+        for img in data.get("images", []):
+            old_id   = img["id"]
+            new_id   = global_image_id
+            global_image_id += 1
+            src_image_remap[old_id] = new_id
+
+            old_fname = img["file_name"]
+            # Roboflow sometimes stores file_name as "train/img.jpg" — use basename
+            # for both the output name and the source lookup.
+            bare_fname = os.path.basename(old_fname)
+            new_fname  = f"{src_name}__{bare_fname}"
+
+            # Probe candidate source locations
+            src_candidates = [
+                os.path.join(image_dir, old_fname),          # exact as stored
+                os.path.join(image_dir, bare_fname),         # basename only
+                os.path.join(image_dir, "..", bare_fname),   # one level up
+            ]
+            src_path = next((p for p in src_candidates if os.path.isfile(p)), None)
+            dst_path = os.path.join(output_dir, new_fname)
+
+            if src_path and not os.path.exists(dst_path):
+                shutil.copy2(src_path, dst_path)
+            elif not src_path:
+                print(
+                    f"[MERGE] WARNING: image not found — tried:\n"
+                    + "\n".join(f"  {p}" for p in src_candidates)
+                )
+
+            merged_images.append({
+                "id":        new_id,
+                "file_name": new_fname,
+                "width":     img.get("width", 0),
+                "height":    img.get("height", 0),
+            })
+
+        # Remap annotations
+        for ann in data.get("annotations", []):
+            new_cat_id = src_cat_remap.get(ann["category_id"])
+            if new_cat_id is None:
+                continue   # category not in unified set — drop
+            new_img_id = src_image_remap.get(ann["image_id"])
+            if new_img_id is None:
+                continue
+
+            merged_annotations.append({
+                "id":           global_ann_id,
+                "image_id":     new_img_id,
+                "category_id":  new_cat_id,
+                "bbox":         ann.get("bbox", []),
+                "area":         ann.get("area", 0),
+                "segmentation": ann.get("segmentation", []),
+                "iscrowd":      ann.get("iscrowd", 0),
+            })
+            global_ann_id += 1
+
+        n_imgs = len(data.get("images", []))
+        n_anns = len(data.get("annotations", []))
+        print(f"[MERGE]   {src_name}: {n_imgs} images, {n_anns} annotations")
+
+    # ── Write merged JSON ─────────────────────────────────────────────────────
+    merged_coco = {
+        "info":        {"description": "Merged badminton detection dataset"},
+        "licenses":    [],
+        "categories":  unified_categories,
+        "images":      merged_images,
+        "annotations": merged_annotations,
+    }
+    out_json = os.path.join(output_dir, "_annotations.coco.json")
+    with open(out_json, "w") as f:
+        json.dump(merged_coco, f)
+
+    print(
+        f"\n[MERGE] Done.\n"
+        f"  Datasets merged : {len(source_dirs)}\n"
+        f"  Total images    : {len(merged_images)}\n"
+        f"  Total annotations: {len(merged_annotations)}\n"
+        f"  Categories      : {all_category_names}\n"
+        f"  Output          : {os.path.abspath(output_dir)}\n"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-dataset Roboflow entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
+def download_roboflow(
+    api_key: str | None = None,
+    datasets: List[Tuple[str, str, str | None]] | None = None,
+) -> None:
+    """Download Roboflow datasets and merge each type group independently.
+
+    datasets: list of (workspace, project_slug, type) triples.
+      type = 'shuttle' → merged into data/input/train/shuttle/
+      type = 'player'  → merged into data/input/train/player/
+      type = None      → merged into data/input/train/  (untagged / legacy)
+
+    This keeps shuttle and player training data strictly separated, preventing
+    the missing-labels problem that occurs when a shuttle-only dataset is merged
+    with a player-only dataset and a single YOLO model is asked to detect both.
+    """
+    if api_key is None:
+        api_key = os.environ.get("ROBOFLOW_API_KEY")
+
+    if not datasets:
+        datasets = [(_DEFAULT_WORKSPACE, _DEFAULT_PROJECT, None)]
+
+    if not api_key:
+        print("[DOWNLOAD] No API key provided.")
+        for ws, proj, _ in datasets:
+            _print_roboflow_manual(ws, proj)
+        return
+
+    # ── Download each dataset to its raw staging dir ──────────────────────────
+    # Map (workspace, project, type) → local raw dir
+    downloaded: list[Tuple[str, str | None]] = []   # (raw_dir, type)
+    for ws, proj, dtype in datasets:
+        raw_dir = _download_one_roboflow(api_key, ws, proj)
+        if raw_dir:
+            downloaded.append((raw_dir, dtype))
+
+    if not downloaded:
+        print("[DOWNLOAD] No datasets downloaded — merge skipped.")
+        return
+
+    # ── Group by type ─────────────────────────────────────────────────────────
+    from collections import defaultdict
+    groups: dict[str | None, list[str]] = defaultdict(list)
+    for raw_dir, dtype in downloaded:
+        groups[dtype].append(raw_dir)
+
+    # ── Merge each group into its output directory ────────────────────────────
+    for dtype, dirs in groups.items():
+        if dtype is None:
+            out_dir = ROBOFLOW_TRAIN_DIR              # untagged → data/input/train/
+        else:
+            out_dir = os.path.join(ROBOFLOW_TRAIN_DIR, dtype)  # data/input/train/shuttle/ etc.
+
+        label = f"'{dtype}'" if dtype else "untagged"
+        print(f"\n[MERGE] Group {label}: {len(dirs)} dataset(s) → '{out_dir}'")
+        merge_coco_datasets(dirs, out_dir)
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print("\n[DOWNLOAD] All done. Training data locations:")
+    for dtype, dirs in groups.items():
+        if dtype is None:
+            out_dir = ROBOFLOW_TRAIN_DIR
+        else:
+            out_dir = os.path.join(ROBOFLOW_TRAIN_DIR, dtype)
+        label = dtype or "untagged"
+        print(f"  {label:10s} ({len(dirs)} dataset(s)) → {os.path.abspath(out_dir)}")
+    print()
+    print("  Pass these to training:")
+    if "shuttle" in groups:
+        print(f"    TrackNet : --data-dir {os.path.join(ROBOFLOW_TRAIN_DIR, 'shuttle')}")
+    if "player" in groups:
+        print(f"    YOLO     : --data-dir {os.path.join(ROBOFLOW_TRAIN_DIR, 'player')}")
+
+
+# ── Legacy defaults (used when no --rf-dataset given) ────────────────────────
+_DEFAULT_WORKSPACE = "badminton-rojkf"   # PLACEHOLDER — replace via --rf-dataset
+_DEFAULT_PROJECT   = "badminton-hehp8"   # PLACEHOLDER — replace via --rf-dataset
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FineBadminton20k
+# ─────────────────────────────────────────────────────────────────────────────
 
 def download_finebadminton(hf_dir: str | None = None) -> None:
     """Download FineBadminton20k from HuggingFace, or print instructions.
@@ -189,7 +531,6 @@ def download_finebadminton(hf_dir: str | None = None) -> None:
     print(f"\n[DOWNLOAD] Attempting HuggingFace download → {target}")
     print(f"           Dataset ID: {FINEBADMINTON_HF_ID}")
 
-    # Try programmatic download via huggingface_hub
     try:
         from huggingface_hub import snapshot_download
         os.makedirs(target, exist_ok=True)
@@ -202,11 +543,10 @@ def download_finebadminton(hf_dir: str | None = None) -> None:
         print(f"[DOWNLOAD] FineBadminton20k downloaded to: {target}")
         return
     except ImportError:
-        pass   # huggingface_hub not installed — fall through to instructions
+        pass
     except Exception as e:
         print(f"[DOWNLOAD] huggingface_hub download failed ({e})")
 
-    # Fall back: print CLI instructions
     print(
         "\n[DOWNLOAD] FineBadminton20k — manual download (43 GB):\n"
         "\n"
@@ -218,16 +558,15 @@ def download_finebadminton(hf_dir: str | None = None) -> None:
         "\n"
         "  Option B — Python:\n"
         "    from huggingface_hub import snapshot_download\n"
-        f"   snapshot_download(repo_id='{FINEBADMINTON_HF_ID}',\n"
-        f"                     repo_type='dataset', local_dir='{target}')\n"
+        f"    snapshot_download(repo_id='{FINEBADMINTON_HF_ID}',\n"
+        f"                      repo_type='dataset', local_dir='{target}')\n"
         "\n"
-        "  Option C — datasets library (downloads + converts to Arrow format):\n"
+        "  Option C — datasets library:\n"
         "    from datasets import load_dataset\n"
-        f"   ds = load_dataset('{FINEBADMINTON_HF_ID}', cache_dir='{target}')\n"
-        f"   ds.save_to_disk('{target}')   # saves as load_from_disk-compatible format\n"
+        f"    ds = load_dataset('{FINEBADMINTON_HF_ID}', cache_dir='{target}')\n"
+        f"    ds.save_to_disk('{target}')\n"
         "\n"
-        "  NOTE: Confirm the exact dataset ID at:\n"
-        f"        {FINEBADMINTON_URL}\n"
+        f"  Confirm dataset ID at: {FINEBADMINTON_URL}\n"
         "\n"
         "  After download:\n"
         f"    python training/train_stroke.py --data-dir {target}\n"
@@ -236,14 +575,37 @@ def download_finebadminton(hf_dir: str | None = None) -> None:
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Download badminton training datasets."
+        description="Download badminton training datasets.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  # 3 shuttle datasets + 1 player dataset, merged separately:\n"
+            "  python utils/data_download.py --roboflow \\\n"
+            "      --api-key $ROBOFLOW_API_KEY \\\n"
+            "      --rf-dataset ws1/shuttle-ds1:shuttle \\\n"
+            "      --rf-dataset ws2/shuttle-ds2:shuttle \\\n"
+            "      --rf-dataset ws3/shuttle-ds3:shuttle \\\n"
+            "      --rf-dataset ws4/player-ds:player\n"
+            "\n"
+            "  Output:\n"
+            "    data/input/train/shuttle/  ← 3 shuttle datasets merged\n"
+            "    data/input/train/player/   ← 1 player dataset\n"
+            "\n"
+            "  # FineBadminton on OSCAR scratch:\n"
+            "  python utils/data_download.py --finebadminton \\\n"
+            "      --hf-dir /oscar/scratch/$USER/finebadminton20k\n"
+        ),
     )
     parser.add_argument(
         "--roboflow",
         action="store_true",
-        help="Download Roboflow badminton-hehp8 dataset.",
+        help="Download Roboflow dataset(s) and merge into data/input/train/.",
     )
     parser.add_argument(
         "--finebadminton",
@@ -262,22 +624,19 @@ def main() -> None:
         help="Roboflow private API key (or set ROBOFLOW_API_KEY env var).",
     )
     parser.add_argument(
-        "--rf-workspace",
-        dest="rf_workspace",
-        default=None,
+        "--rf-dataset",
+        dest="rf_datasets",
+        metavar="WORKSPACE/PROJECT[:TYPE]",
+        action="append",
+        default=[],
+        type=_parse_rf_dataset,
         help=(
-            "Roboflow workspace slug (the first path component in the Universe URL). "
-            "Overrides the module-level default. "
-            "Find a working public dataset at https://universe.roboflow.com"
-        ),
-    )
-    parser.add_argument(
-        "--rf-project",
-        dest="rf_project",
-        default=None,
-        help=(
-            "Roboflow project slug (the second path component in the Universe URL). "
-            "Overrides the module-level default."
+            "Roboflow dataset in 'workspace/project[:type]' form. "
+            "type must be 'shuttle' or 'player'. "
+            "Datasets with the same type are merged together into "
+            "data/input/train/<type>/. "
+            "Repeat this flag for multiple datasets. "
+            "Find slugs at https://universe.roboflow.com"
         ),
     )
     parser.add_argument(
@@ -286,7 +645,7 @@ def main() -> None:
         default=None,
         help=(
             "Local directory for FineBadminton20k download. "
-            "On OSCAR use /oscar/scratch/$USER/finebadminton20k to avoid quota issues. "
+            "On OSCAR use /oscar/scratch/$USER/finebadminton20k. "
             "Default: data/input/finebadminton"
         ),
     )
@@ -297,11 +656,8 @@ def main() -> None:
         sys.exit(1)
 
     if args.roboflow or args.all:
-        download_roboflow(
-            api_key=args.api_key,
-            workspace=args.rf_workspace,
-            project_slug=args.rf_project,
-        )
+        datasets = args.rf_datasets if args.rf_datasets else None
+        download_roboflow(api_key=args.api_key, datasets=datasets)
 
     if args.finebadminton or args.all:
         download_finebadminton(hf_dir=args.hf_dir)
