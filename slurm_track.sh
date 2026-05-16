@@ -34,6 +34,9 @@ DEVICE="${DEVICE:-cuda}"
 mkdir -p data/output/logs
 
 # ── Activate environment ──────────────────────────────────────────────────────
+# Load CUDA + cuDNN modules (required for torch CUDA support)
+module load cuda/11.8.0 cudnn/8.6.0
+
 source .venv/bin/activate                     # plain venv alternative
 
 # After activation, use plain python from the activated venv.
