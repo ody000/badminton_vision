@@ -162,6 +162,77 @@ def _get_latest_version(project) -> int:
 # Single-dataset Roboflow download
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _roboflow_api_download(
+    api_key: str,
+    workspace: str,
+    project_slug: str,
+    version_num: int,
+    target: str,
+) -> bool:
+    """Download a Roboflow dataset by hitting the REST API directly.
+
+    Bypasses the Roboflow Python SDK's extraction logic, which silently fails
+    on some HPC/NFS environments.  Downloads the COCO zip via requests and
+    extracts it with zipfile — fully under our control.
+
+    Returns True on success.
+    """
+    import zipfile
+    import tempfile
+
+    try:
+        import requests
+    except ImportError:
+        print("[DOWNLOAD] 'requests' not installed — pip install requests")
+        return False
+
+    url = (
+        f"https://api.roboflow.com/{workspace}/{project_slug}"
+        f"/{version_num}/{ROBOFLOW_FORMAT}"
+        f"?api_key={api_key}"
+    )
+    print(f"[DOWNLOAD]   → REST API: GET {url.split('?')[0]}?api_key=***")
+
+    resp = requests.get(url, timeout=30)
+    if resp.status_code != 200:
+        print(f"[DOWNLOAD]   API error {resp.status_code}: {resp.text[:300]}")
+        return False
+
+    # The API returns JSON with a {"export": {"link": "..."}} field
+    info = resp.json()
+    zip_url = (
+        info.get("export", {}).get("link")
+        or info.get("link")
+        or info.get("url")
+    )
+    if not zip_url:
+        print(f"[DOWNLOAD]   Unexpected API response shape: {list(info.keys())}")
+        return False
+
+    print(f"[DOWNLOAD]   → downloading zip …")
+    zip_resp = requests.get(zip_url, stream=True, timeout=300)
+    zip_resp.raise_for_status()
+
+    # Stream to a temp file then extract — avoids holding GBs in memory
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        tmp_path = tmp.name
+        downloaded = 0
+        for chunk in zip_resp.iter_content(chunk_size=1 << 20):  # 1 MB
+            tmp.write(chunk)
+            downloaded += len(chunk)
+        print(f"[DOWNLOAD]   → {downloaded / 1e6:.1f} MB downloaded")
+
+    print(f"[DOWNLOAD]   → extracting to {target} …")
+    os.makedirs(target, exist_ok=True)
+    with zipfile.ZipFile(tmp_path, "r") as zf:
+        zf.extractall(target)
+    os.unlink(tmp_path)
+
+    n_files = sum(len(fs) for _, _, fs in os.walk(target))
+    print(f"[DOWNLOAD]   → extracted {n_files} files")
+    return n_files > 0
+
+
 def _download_one_roboflow(
     api_key: str,
     workspace: str,
@@ -169,40 +240,84 @@ def _download_one_roboflow(
 ) -> str | None:
     """Download one Roboflow dataset to data/input/roboflow/<project_slug>/.
 
+    Strategy:
+      1. Try the Roboflow Python SDK (fast, well-tested on normal machines).
+      2. If SDK leaves the target directory empty, fall back to the REST API
+         + direct zip extraction (reliable on HPC/NFS environments where the
+         SDK's extraction silently fails).
+
     Returns the local directory path on success, None on failure.
     """
-    target = os.path.join(ROBOFLOW_RAW_DIR, project_slug)
+    target = os.path.abspath(os.path.join(ROBOFLOW_RAW_DIR, project_slug))
 
     if _dir_has_files(target):
         print(f"[DOWNLOAD] '{workspace}/{project_slug}' already present at '{target}' — skipping.")
         return target
 
     print(f"[DOWNLOAD] Downloading Roboflow workspace='{workspace}'  project='{project_slug}'")
+
+    version_num: int | None = None
+
+    # ── Attempt 1: Roboflow Python SDK ────────────────────────────────────────
     try:
         from roboflow import Roboflow
 
         rf      = Roboflow(api_key=api_key)
         project = rf.workspace(workspace).project(project_slug)
-
         version_num = _get_latest_version(project)
-        print(f"[DOWNLOAD]   → version {version_num}")
+        print(f"[DOWNLOAD]   → version {version_num}  (via SDK)")
 
         os.makedirs(target, exist_ok=True)
         project.version(version_num).download(
             ROBOFLOW_FORMAT,
             location=target,
-            overwrite=False,
+            overwrite=True,
         )
-        print(f"[DOWNLOAD]   → saved to: {target}")
-        return target
     except ImportError:
-        print("[DOWNLOAD] 'roboflow' package not installed.  pip install roboflow")
-        _print_roboflow_manual(workspace, project_slug)
-        return None
+        print("[DOWNLOAD]   roboflow SDK not installed — skipping to REST fallback")
     except Exception as e:
-        print(f"[DOWNLOAD] Failed ({workspace}/{project_slug}): {e}")
+        print(f"[DOWNLOAD]   SDK error: {e} — trying REST fallback")
+
+    # ── Check if SDK wrote anything ───────────────────────────────────────────
+    if _dir_has_files(target):
+        n = sum(len(fs) for _, _, fs in os.walk(target))
+        print(f"[DOWNLOAD]   → SDK wrote {n} files to {target}")
+        return target
+
+    print(f"[DOWNLOAD]   SDK left target empty — falling back to REST API download")
+
+    # ── Attempt 2: REST API + direct zip extraction ───────────────────────────
+    if version_num is None:
+        # SDK wasn't available; probe version via API
+        try:
+            import requests
+            for v in range(1, 11):
+                r = requests.get(
+                    f"https://api.roboflow.com/{workspace}/{project_slug}/{v}"
+                    f"?api_key={api_key}",
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    version_num = v
+                    break
+        except Exception:
+            pass
+
+    if version_num is None:
+        print(f"[DOWNLOAD]   Could not determine version number — giving up.")
         _print_roboflow_manual(workspace, project_slug)
         return None
+
+    try:
+        ok = _roboflow_api_download(api_key, workspace, project_slug, version_num, target)
+        if ok:
+            print(f"[DOWNLOAD]   → REST download succeeded: {target}")
+            return target
+    except Exception as e:
+        print(f"[DOWNLOAD]   REST download failed: {e}")
+
+    _print_roboflow_manual(workspace, project_slug)
+    return None
 
 
 def _print_roboflow_manual(workspace: str, project: str) -> None:
