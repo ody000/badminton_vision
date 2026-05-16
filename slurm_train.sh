@@ -62,13 +62,9 @@ mkdir -p data/output/logs
 #
 source .venv/bin/activate                     # plain venv alternative
 
-# After activation, set PYTHON to whatever interpreter has torch installed.
-# uv run python is tried first; falls back to plain python.
-if command -v uv &>/dev/null; then
-    PYTHON="uv run python"
-else
-    PYTHON="python"
-fi
+# After activation, use plain python from the activated venv.
+# (uv run python doesn't respect the activated environment)
+PYTHON="python"
 
 # Sanity-check: abort immediately if torch is missing rather than failing deep
 # inside a torchrun subprocess with a cryptic error.

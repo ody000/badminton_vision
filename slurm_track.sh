@@ -34,11 +34,11 @@ DEVICE="${DEVICE:-cuda}"
 mkdir -p data/output/logs
 
 # ── Activate environment ──────────────────────────────────────────────────────
-if command -v uv &>/dev/null; then
-    PYTHON="uv run python"
-else
-    PYTHON="python"
-fi
+source .venv/bin/activate                     # plain venv alternative
+
+# After activation, use plain python from the activated venv.
+# (uv run python doesn't respect the activated environment)
+PYTHON="python"
 
 # Sanity-check: abort immediately if torch is missing rather than failing deep
 # inside a subprocess with a cryptic error.
