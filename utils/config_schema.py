@@ -33,7 +33,7 @@ class ConfigSchema:
     tracknet_expected_h: int = 288
     tracknet_expected_w: int = 512
     tracknet_conf_threshold: float = 0.001
-    tracknet_weights: str = "weights/tracknet.pt"
+    tracknet_weights: str = "models/tracknet.pt"
 
     # ── Hit detection ─────────────────────────────────────────────────────────
     hit_trajectory_n: int = 6
@@ -54,7 +54,7 @@ class ConfigSchema:
     # ── Player tracking ───────────────────────────────────────────────────────
     player_conf_threshold: float = 0.5
     player_bytetrack_history: int = 1000
-    player_weights: str = "weights/yolo_badminton.pt"
+    player_weights: str = "models/yolo.pt"
 
     # ── Court ─────────────────────────────────────────────────────────────────
     court_real_width_cm: float = 610.0
@@ -64,7 +64,7 @@ class ConfigSchema:
     # ── Stroke classifier ─────────────────────────────────────────────────────
     stroke_pose_joints: int = 33
     stroke_trajectory_n: int = 6
-    stroke_weights: str = "weights/stroke_classifier.pt"
+    stroke_weights: str = "models/stroke.pt"
 
     # ── Visualization ─────────────────────────────────────────────────────────
     court_insert_h: int = 300

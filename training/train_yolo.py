@@ -6,7 +6,7 @@ calls model.train(...) via Ultralytics.
 Usage:
     python training/train_yolo.py --data-dir data/input/train_mog_reflect --output-dir data/output
 
-Best weights saved to weights/yolo_badminton.pt.
+Best weights saved to models/yolo.pt.
 
 CLI args: --data-dir, --output-dir, --epochs, --batch-size, --lr, --device
 """
@@ -136,8 +136,8 @@ def main():
 
     cfg = load_config(args.config)
     device = args.device or getattr(cfg, "device", "cpu")
-    weights_out = "weights/yolo_badminton.pt"
-    os.makedirs("weights", exist_ok=True)
+    weights_out = "models/yolo.pt"
+    os.makedirs("models", exist_ok=True)
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Convert COCO to YOLO format
@@ -147,7 +147,7 @@ def main():
     # Train with Ultralytics
     from ultralytics import YOLO
 
-    base_weights = getattr(cfg, "player_weights", "weights/yolo_badminton.pt")
+    base_weights = getattr(cfg, "player_weights", "models/yolo.pt")
     if not os.path.exists(base_weights):
         base_weights = "yolov8n.pt"
 

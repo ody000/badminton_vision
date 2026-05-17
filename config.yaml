@@ -16,7 +16,7 @@ tracknet_box_size: 16
 tracknet_expected_h: 288
 tracknet_expected_w: 512
 tracknet_conf_threshold: 0.001
-tracknet_weights: weights/tracknet.pt
+tracknet_weights: models/tracknet.pt
 
 # ─── Hit detection ───────────────────────────────────────────────────────────
 hit_trajectory_n: 6               # positions for quadratic fit (pre+post)
@@ -40,7 +40,7 @@ rally_min_hits: 1                 # rallies with fewer confirmed hits are discar
 # ─── Player tracking ─────────────────────────────────────────────────────────
 player_conf_threshold: 0.5
 player_bytetrack_history: 1000
-player_weights: weights/yolo_badminton.pt  # fine-tuned; falls back to yolov8n.pt
+player_weights: models/yolo.pt             # fine-tuned; falls back to yolov8n.pt
 
 # ─── Court ───────────────────────────────────────────────────────────────────
 court_real_width_cm: 610.0
@@ -50,7 +50,7 @@ court_points_file: data/input/court_points.json
 # ─── Stroke classifier ───────────────────────────────────────────────────────
 stroke_pose_joints: 33
 stroke_trajectory_n: 6
-stroke_weights: weights/stroke_classifier.pt
+stroke_weights: models/stroke.pt
 
 # ─── Visualization ───────────────────────────────────────────────────────────
 court_insert_h: 300

@@ -345,8 +345,8 @@ def main():
     criterion = nn.CrossEntropyLoss()
 
     os.makedirs(args.output_dir, exist_ok=True)
-    os.makedirs("weights", exist_ok=True)
-    weights_out = "weights/stroke_classifier.pt"
+    os.makedirs("models", exist_ok=True)
+    weights_out = "models/stroke.pt"
     best_f1 = 0.0
 
     for epoch in range(1, args.epochs + 1):

@@ -22,7 +22,7 @@ from models.shuttle_tracknet import TrackNetTracker
 
 def _make_cfg():
     return SimpleNamespace(
-        tracknet_weights="weights/tracknet.pt",  # may not exist; that's fine
+        tracknet_weights="models/tracknet.pt",  # may not exist; that's fine
         device="cpu",
         tracknet_box_size=16,
         tracknet_conf_threshold=0.0,  # accept any detection

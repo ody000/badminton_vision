@@ -1,6 +1,6 @@
 import torch
 
-weights_path = "weights/tracknet_weights.pt"
+weights_path = "models/tracknet.pt"
 checkpoint = torch.load(weights_path, map_location="cpu")
 
 # Handle different PyTorch save formats

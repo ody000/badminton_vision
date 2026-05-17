@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 def _make_cfg():
     return SimpleNamespace(
-        player_weights="weights/yolo_badminton.pt",  # may not exist; falls back to yolov8n.pt
+        player_weights="models/yolo.pt",  # may not exist; falls back to yolov8n.pt
         player_conf_threshold=0.5,
         mog2_warmup_frames=150,
         mog2_foreground_thresh_player=0.06,
