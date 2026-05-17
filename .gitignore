@@ -1,11 +1,32 @@
-/data/input
-/data/output
+# ============ TRAINING & DATA OUTPUTS ============
+# Training outputs and datasets (can be regenerated)
+/data/
+/runs/
+/logs/
+/weights/
+*.onnx
 
-*/__pycache__
-*.pyc
+# ============ PYTHON CACHE ============
+# Bytecode, caches, and compiled files
+__pycache__/
+*/__pycache__/
+*.py[cod]
 *.pyo
 *.pyd
-__pycache__/
-.venv/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.coverage
 
+# ============ IDE & OS ============
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# ============ ENVIRONMENTS ============
+.venv/
+venv/
 slayminton/

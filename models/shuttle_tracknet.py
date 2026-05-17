@@ -42,7 +42,7 @@ class TrackNetTracker:
     ):
         # Read params from cfg if provided, use explicit args as overrides.
         if cfg is not None:
-            weights_path = weights_path or getattr(cfg, "tracknet_weights", "weights/tracknet.pt")
+            weights_path = weights_path or getattr(cfg, "tracknet_weights", "models/tracknet.pt")
             device = device or getattr(cfg, "device", "cpu")
             box_size = int(getattr(cfg, "tracknet_box_size", box_size))
             conf_threshold = float(getattr(cfg, "tracknet_conf_threshold", conf_threshold))

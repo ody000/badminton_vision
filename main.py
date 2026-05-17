@@ -16,8 +16,8 @@ Output per run: {output_dir}/{video_stem}_{timestamp}/
 
 Visualization note:
   annotated_video.mp4 is opt-in because re-encoding is slow and requires
-  downloading the file from OSCAR.  Use viewer.py locally instead:
-      python viewer.py --run <run_dir> --video <original_video>
+  downloading the file from OSCAR.  Use tools/viewer.py locally instead:
+      python tools/viewer.py --run <run_dir> --video <original_video>
 """
 
 from __future__ import annotations

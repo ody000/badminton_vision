@@ -33,23 +33,29 @@ DEVICE="${DEVICE:-cuda}"
 # ── Ensure log directory exists ───────────────────────────────────────────────
 mkdir -p data/output/logs
 
-# ── Activate environment ──────────────────────────────────────────────────────
-# Use absolute path to venv (required for compute nodes)
-source /users/zshen38/badminton_vision/.venv/bin/activate
+# ── OSCAR-specific CUDA setup ───────────────────────────────────────────────
+# Load CUDA modules on compute node
+module load cuda/11.8.0-kuhf cudnn/8.7.0.84-11.8-kff3
 
-# Use python directly from the activated venv
-PYTHON="python -u"
+# ── Activate environment ──────────────────────────────────────────────────────
+# Activate conda environment
+eval "$(conda shell.bash hook)"
+conda activate badminton_train
+PYTHON_CMD="python -u"
 
 # Sanity-check: abort immediately if torch is missing rather than failing deep
 # inside a subprocess with a cryptic error.
-if ! ${PYTHON} -c "import torch" 2>/dev/null; then
-    echo "[SLURM_TRACK] ERROR: 'import torch' failed for PYTHON='${PYTHON}'"
-    echo "  Activate your conda/venv environment before submitting, or"
-    echo "  uncomment the module load / conda activate lines above."
-    exit 1
+if ! ${PYTHON_CMD} -c "import torch" 2>/dev/null; then
+    echo "[SLURM_TRACK] ERROR: 'import torch' failed for PYTHON='${PYTHON_CMD}'"
+    echo "  Attempting to install torch for CUDA 11.8..."
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 --quiet
+    if ! ${PYTHON_CMD} -c "import torch" 2>/dev/null; then
+        echo "[SLURM_TRACK] FATAL: 'import torch' still failed after install"
+        exit 1
+    fi
 fi
-echo "[SLURM_TRACK] torch OK — $(${PYTHON} -c 'import torch; print(torch.__version__)')"
-echo "[SLURM_TRACK] CUDA available: $(${PYTHON} -c 'import torch; print(torch.cuda.is_available())')"
+echo "[SLURM_TRACK] torch OK — $(${PYTHON_CMD} -c 'import torch; print(torch.__version__)')"
+echo "[SLURM_TRACK] CUDA available: $(${PYTHON_CMD} -c 'import torch; print(torch.cuda.is_available())')"
 
 echo "[SLURM_TRACK] VIDEO_PATH=${VIDEO_PATH}"
 echo "[SLURM_TRACK] SHUTTLE_WEIGHTS=${SHUTTLE_WEIGHTS}"
@@ -59,7 +65,7 @@ echo "[SLURM_TRACK] DEVICE=${DEVICE}"
 echo "[SLURM_TRACK] Starting at $(date)"
 
 # ── Run inference ─────────────────────────────────────────────────────────────
-${PYTHON} main.py \
+${PYTHON_CMD} main.py \\
     --config config.yaml \
     --video "${VIDEO_PATH}" \
     --court-points "${COURT_POINTS}" \

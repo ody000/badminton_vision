@@ -131,7 +131,7 @@ def compute_map_at_50(
         recall = tp_cum / (len(gts_cls) + 1e-9)
 
         # AP via trapezoidal rule
-        ap = float(np.trapz(precision, recall)) if len(recall) > 1 else float(precision[-1] if len(precision) else 0.0)
+        ap = float(np.trapezoid(precision, recall)) if len(recall) > 1 else float(precision[-1] if len(precision) else 0.0)
         aps.append(ap)
 
     if not aps:

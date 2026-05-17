@@ -50,26 +50,29 @@ WEIGHTS="${WEIGHTS:-}"
 # ── Ensure log directory exists ───────────────────────────────────────────────
 mkdir -p data/output/logs
 
-# ── Activate environment ──────────────────────────────────────────────────────
-# OSCAR: load CUDA + cuDNN modules, then activate your conda/venv.
-# Uncomment and edit the lines that match your setup:
-#
-# Use absolute path to venv (required for compute nodes)
-source /users/zshen38/badminton_vision/.venv/bin/activate
+# ── OSCAR-specific CUDA setup ───────────────────────────────────────────────
+# Load CUDA modules on compute node
+module load cuda/11.8.0-kuhf cudnn/8.7.0.84-11.8-kff3
 
-# Use python directly from the activated venv
-PYTHON="python -u"
+# ── Activate environment ──────────────────────────────────────────────────────
+# Activate conda environment
+eval "$(conda shell.bash hook)"
+conda activate badminton_train
+PYTHON_CMD="python -u"
 
 # Sanity-check: abort immediately if torch is missing rather than failing deep
 # inside a torchrun subprocess with a cryptic error.
-if ! ${PYTHON} -c "import torch" 2>/dev/null; then
-    echo "[SLURM] ERROR: 'import torch' failed for PYTHON='${PYTHON}'"
-    echo "  Activate your conda/venv environment before submitting, or"
-    echo "  uncomment the module load / conda activate lines above."
-    exit 1
+if ! ${PYTHON_CMD} -c "import torch" 2>/dev/null; then
+    echo "[SLURM] ERROR: 'import torch' failed for PYTHON='${PYTHON_CMD}'"
+    echo "  Attempting to install torch for CUDA 11.8..."
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 --quiet
+    if ! ${PYTHON_CMD} -c "import torch" 2>/dev/null; then
+        echo "[SLURM] FATAL: 'import torch' still failed after install"
+        exit 1
+    fi
 fi
-echo "[SLURM] torch OK — $(${PYTHON} -c 'import torch; print(torch.__version__)')"
-echo "[SLURM] CUDA available: $(${PYTHON} -c 'import torch; print(torch.cuda.is_available())')"
+echo "[SLURM] torch OK — $(${PYTHON_CMD} -c 'import torch; print(torch.__version__)')"
+echo "[SLURM] CUDA available: $(${PYTHON_CMD} -c 'import torch; print(torch.cuda.is_available())')"
 
 echo "[SLURM] MODE=${MODE} NGPUS=${NGPUS} JOB_ID=${SLURM_JOB_ID}"
 echo "[SLURM] Starting at $(date)"
@@ -79,32 +82,56 @@ case "${MODE}" in
 
     train-tracknet)
         echo "[SLURM] Training TrackNet"
-        ${PYTHON} -m torch.distributed.run \
-            --nproc_per_node="${NGPUS}" \
-            training/train_tracknet.py \
-            --config config.yaml \
-            --data-dir "${DATA_DIR}" \
-            --output-dir "${OUTPUT_DIR}" \
-            --epochs "${EPOCHS}" \
-            --batch-size "${BATCH_SIZE}" \
-            --lr "${LR}" \
-            --device "${DEVICE}" \
-            --world-size "${NGPUS}" \
-            ${WEIGHTS:+--weights "${WEIGHTS}"}
+        if [[ "${NGPUS}" -gt 1 ]]; then
+            ${PYTHON_CMD} -m torch.distributed.run \
+                --nproc_per_node="${NGPUS}" \
+                training/train_tracknet.py \
+                --config config.yaml \
+                --data-dir "${DATA_DIR}" \
+                --output-dir "${OUTPUT_DIR}" \
+                --epochs "${EPOCHS}" \
+                --batch-size "${BATCH_SIZE}" \
+                --lr "${LR}" \
+                --device "${DEVICE}" \
+                --world-size "${NGPUS}" \
+                ${WEIGHTS:+--weights "${WEIGHTS}"}
+        else
+            ${PYTHON_CMD} training/train_tracknet.py \
+                --config config.yaml \
+                --data-dir "${DATA_DIR}" \
+                --output-dir "${OUTPUT_DIR}" \
+                --epochs "${EPOCHS}" \
+                --batch-size "${BATCH_SIZE}" \
+                --lr "${LR}" \
+                --device "${DEVICE}" \
+                --world-size "${NGPUS}" \
+                ${WEIGHTS:+--weights "${WEIGHTS}"}
+        fi
         ;;
 
     train-yolo)
         echo "[SLURM] Training YOLO"
-        ${PYTHON} -m torch.distributed.run \
-            --nproc_per_node="${NGPUS}" \
-            training/train_yolo.py \
-            --config config.yaml \
-            --data-dir "${DATA_DIR}" \
-            --output-dir "${OUTPUT_DIR}" \
-            --epochs "${EPOCHS}" \
-            --batch-size "${BATCH_SIZE}" \
-            --lr "${LR}" \
-            --device "${DEVICE}"
+        if [[ "${NGPUS}" -gt 1 ]]; then
+            ${PYTHON_CMD} -m torch.distributed.run \
+                --nproc_per_node="${NGPUS}" \
+                training/train_yolo.py \
+                --config config.yaml \
+                --data-dir "${DATA_DIR}" \
+                --output-dir "${OUTPUT_DIR}" \
+                --epochs "${EPOCHS}" \
+                --batch-size "${BATCH_SIZE}" \
+                --lr "${LR}" \
+                --device "${DEVICE}"
+        else
+            ${PYTHON_CMD} training/train_yolo.py \
+                --config config.yaml \
+                --data-dir "${DATA_DIR}" \
+                --output-dir "${OUTPUT_DIR}" \
+                --epochs "${EPOCHS}" \
+                --batch-size "${BATCH_SIZE}" \
+                --lr "${LR}" \
+                --device "${DEVICE}"
+        fi
         ;;
 
     train-stroke)
@@ -114,21 +141,32 @@ case "${MODE}" in
         #   sbatch --export=MODE=train-stroke,FINEBADMINTON_DIR=/path/to/data slurm_train.sh
         _FB_DIR="${FINEBADMINTON_DIR:-/oscar/scratch/${USER}/finebadminton20k}"
         echo "[SLURM] FINEBADMINTON_DIR=${_FB_DIR}"
-        ${PYTHON} -m torch.distributed.run \
-            --nproc_per_node="${NGPUS}" \
-            training/train_stroke.py \
-            --config config.yaml \
-            --data-dir "${_FB_DIR}" \
-            --output-dir "${OUTPUT_DIR}" \
-            --epochs "${EPOCHS:-30}" \
-            --batch-size "${BATCH_SIZE}" \
-            --lr "${LR}" \
-            --device "${DEVICE}"
+        if [[ "${NGPUS}" -gt 1 ]]; then
+            ${PYTHON_CMD} -m torch.distributed.run \
+                --nproc_per_node="${NGPUS}" \
+                training/train_stroke.py \
+                --config config.yaml \
+                --data-dir "${_FB_DIR}" \
+                --output-dir "${OUTPUT_DIR}" \
+                --epochs "${EPOCHS:-30}" \
+                --batch-size "${BATCH_SIZE}" \
+                --lr "${LR}" \
+                --device "${DEVICE}"
+        else
+            ${PYTHON_CMD} training/train_stroke.py \
+                --config config.yaml \
+                --data-dir "${_FB_DIR}" \
+                --output-dir "${OUTPUT_DIR}" \
+                --epochs "${EPOCHS:-30}" \
+                --batch-size "${BATCH_SIZE}" \
+                --lr "${LR}" \
+                --device "${DEVICE}"
+        fi
         ;;
 
     run-main)
         echo "[SLURM] Running main pipeline"
-        ${PYTHON} main.py \
+        ${PYTHON_CMD} main.py \
             --config config.yaml \
             --video "${VIDEO_PATH}" \
             --court-points "${COURT_POINTS}" \

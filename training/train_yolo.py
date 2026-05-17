@@ -37,20 +37,30 @@ def coco_to_yolo_format(data_dir: str, yolo_dir: str) -> str:
     cat_names = []
     for cat in coco.get("categories", []):
         name = cat["name"].lower()
-        if name == "person":
+        if name in ["person", "player", "player1", "player2"]:
             yolo_id = 0
-        elif "shuttle" in name or "badminton" in name:
-            yolo_id = 1
-        else:
-            continue
-        if yolo_id not in [v for v in cat_id_to_yolo.values()]:
+            # Always map all player variants to class 0
             cat_id_to_yolo[cat["id"]] = yolo_id
             cat_names.append((yolo_id, cat["name"]))
+            print(f"[TRAIN_YOLO] Mapped COCO cat_id={cat['id']} name={cat['name']} -> yolo_id=0")
+        elif "shuttle" in name or "badminton" in name:
+            yolo_id = 1
+            cat_id_to_yolo[cat["id"]] = yolo_id
+            cat_names.append((yolo_id, cat["name"]))
+            print(f"[TRAIN_YOLO] Mapped COCO cat_id={cat['id']} name={cat['name']} -> yolo_id=1")
+        else:
+            continue
 
-    # Deduplicate names by id
-    id_to_name = {yid: n for yid, n in cat_names}
-    nc = max(id_to_name.keys()) + 1 if id_to_name else 2
+    print(f"[TRAIN_YOLO] Total mapped categories: {len(cat_id_to_yolo)}")
+    
+    # Deduplicate names by id (keep first occurrence)
+    id_to_name = {}
+    for yid, n in cat_names:
+        if yid not in id_to_name:
+            id_to_name[yid] = n
+    nc = max(id_to_name.keys()) + 1 if id_to_name else 1
     names = [id_to_name.get(i, f"class_{i}") for i in range(nc)]
+    print(f"[TRAIN_YOLO] YOLO class count: {nc}, names: {names}")
 
     # Build image -> annotations map
     img_map = {img["id"]: img for img in coco["images"]}
@@ -58,6 +68,13 @@ def coco_to_yolo_format(data_dir: str, yolo_dir: str) -> str:
     for ann in coco.get("annotations", []):
         if ann["category_id"] in cat_id_to_yolo:
             ann_by_img[ann["image_id"]].append(ann)
+    
+    # Count labels
+    total_labels = sum(len(anns) for anns in ann_by_img.values())
+    images_with_labels = sum(1 for anns in ann_by_img.values() if anns)
+    print(f"[TRAIN_YOLO] Total annotations in COCO: {len(coco.get('annotations', []))}")
+    print(f"[TRAIN_YOLO] Matched annotations: {total_labels} across {images_with_labels} images")
+
 
     # Write YOLO label files
     imgs_dir = os.path.join(yolo_dir, "images", "train")

@@ -28,11 +28,11 @@ class StrokeClassifier:
         if cfg is not None:
             self.trajectory_n = int(getattr(cfg, "stroke_trajectory_n", 6))
             self.pose_joints = int(getattr(cfg, "stroke_pose_joints", 33))
-            weights_path = getattr(cfg, "stroke_weights", "weights/stroke_classifier.pt")
+            weights_path = getattr(cfg, "stroke_weights", "models/stroke.pt")
         else:
             self.trajectory_n = 6
             self.pose_joints = 33
-            weights_path = "weights/stroke_classifier.pt"
+            weights_path = "models/stroke.pt"
 
         # Feature dimension: 33*3 (pose joints x,y,visibility) + trajectory pre+post
         self.feature_dim = self.pose_joints * 3 + self.trajectory_n * 2 * 2

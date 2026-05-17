@@ -26,13 +26,13 @@ class PlayerDetector:
         self.frame_count = 0
 
         if cfg is not None:
-            weights = getattr(cfg, "player_weights", "weights/yolo_badminton.pt")
+            weights = getattr(cfg, "player_weights", "models/yolo.pt")
             self.conf_threshold = float(getattr(cfg, "player_conf_threshold", 0.5))
             self.warmup_frames = int(getattr(cfg, "mog2_warmup_frames", 150))
             self.mog2_fg_thresh = float(getattr(cfg, "mog2_foreground_thresh_player", 0.06))
             self.device = getattr(cfg, "device", "cpu")
         else:
-            weights = "weights/yolo_badminton.pt"
+            weights = "models/yolo.pt"
             self.conf_threshold = 0.5
             self.warmup_frames = 150
             self.mog2_fg_thresh = 0.06
