@@ -65,7 +65,7 @@ echo "[SLURM_TRACK] DEVICE=${DEVICE}"
 echo "[SLURM_TRACK] Starting at $(date)"
 
 # ── Run inference ─────────────────────────────────────────────────────────────
-${PYTHON_CMD} main.py \\
+${PYTHON_CMD} main.py \
     --config config.yaml \
     --video "${VIDEO_PATH}" \
     --court-points "${COURT_POINTS}" \
