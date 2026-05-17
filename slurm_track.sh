@@ -8,7 +8,7 @@
 #   VIDEO_PATH      — path to input video
 #
 # Optional env vars:
-#   SHUTTLE_WEIGHTS — path to TrackNet checkpoint (default: weights/tracknet.pt)
+#   SHUTTLE_WEIGHTS — path to TrackNet checkpoint (default: models/tracknet.pt)
 #   COURT_POINTS    — path to court_points.json (default: data/input/court_points.json)
 #   OUTPUT_DIR      — output directory (default: data/output)
 #   DEVICE          — cpu / cuda (default: cuda)
@@ -25,7 +25,7 @@
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 VIDEO_PATH="${VIDEO_PATH:-data/input/match_clip.mp4}"
-SHUTTLE_WEIGHTS="${SHUTTLE_WEIGHTS:-weights/tracknet.pt}"
+SHUTTLE_WEIGHTS="${SHUTTLE_WEIGHTS:-models/tracknet.pt}"
 COURT_POINTS="${COURT_POINTS:-data/input/court_points.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-data/output}"
 DEVICE="${DEVICE:-cuda}"

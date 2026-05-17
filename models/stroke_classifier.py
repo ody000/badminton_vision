@@ -49,8 +49,8 @@ class StrokeClassifier:
                 static_image_mode=True,
                 model_complexity=1,
             )
-        except ImportError:
-            print("[STROKE] MediaPipe not available; pose features will be zero-filled.")
+        except (ImportError, AttributeError) as e:
+            print(f"[STROKE] MediaPipe unavailable ({type(e).__name__}); pose features will be zero-filled.")
             self._mp_pose = None
 
         # Load transformer weights if available
