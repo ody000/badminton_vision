@@ -11,16 +11,17 @@ Usage:
 
 Keyboard shortcuts:
     Space         Play / Pause
-    ← / →         Step one frame
-    [ / ]  or
+    Left / Right  Step one frame
     PgUp / PgDn   ±10 frames
     Home / End    Jump to first / last frame
-    + / -         Speed ×2 / ÷2
     H             Toggle player boxes
-    S             Toggle shuttle dot
+    S             Toggle shuttle circle
     E             Toggle hit-event flash
     M             Toggle court heatmap insert
     Q / Escape    Quit
+
+Buttons (sidebar row 2):
+    -10s / -5s / +5s / +10s   Time-based skip
 """
 
 from __future__ import annotations
@@ -34,6 +35,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
+# Ensure the project root (parent of tools/) is on sys.path so that
+# `utils.visualization` is importable regardless of where the script
+# is launched from.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import cv2
 import numpy as np
 
@@ -46,6 +52,14 @@ except ImportError:
         "         then re-run viewer.py"
     )
     sys.exit(1)
+
+# Import court heatmap renderer at module level so any failure is visible.
+try:
+    from utils.visualization import render_court_insert as _render_court_insert
+    _HAS_VISUALIZATION = True
+except Exception as _vis_err:
+    print(f"[VIEWER] WARNING: court heatmap disabled — {_vis_err}")
+    _HAS_VISUALIZATION = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -113,6 +127,21 @@ class Viewer:
             fi = ev.get("frame_idx", -1)
             self._events_by_frame.setdefault(fi, []).append(ev)
 
+        # Patch rally count from per-frame rally_active flags when rally_data.json
+        # recorded 0 (e.g. because all rallies were discarded as too short/few hits).
+        if self.analytics.get("rally_count", 0) == 0 and self.tracking:
+            observed = 0
+            prev_active = False
+            for t in self.tracking:
+                active = t.get("rally_active", False)
+                if active and not prev_active:
+                    observed += 1
+                prev_active = active
+            if observed > 0:
+                self.analytics["rally_count"] = observed
+                print(f"[VIEWER] rally_data.json empty; derived {observed} observed rallies "
+                      "from per-frame rally_active flags.")
+
         # ── Open video ────────────────────────────────────────────────
         self.cap = cv2.VideoCapture(str(self.video_path))
         if not self.cap.isOpened():
@@ -124,13 +153,22 @@ class Viewer:
         self.vid_h        = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         # ── Playback state ────────────────────────────────────────────
-        self.frame_idx   = 0
-        self.playing     = False
-        self.speed       = 1.0
-        self._last_tick  = 0.0
-        self._tex_w      = 0
-        self._tex_h      = 0
-        self._tex_tag    = "vid_tex"
+        self.frame_idx      = 0
+        self.playing        = False
+        self.speed          = 1.0
+        self._last_tick     = 0.0
+        self._tex_w         = 0
+        self._tex_h         = 0
+        self._tex_tag       = "vid_tex"
+        # Sequential-read optimisation: track the last decoded frame index.
+        # If the next requested frame is exactly last+1 the cap is already
+        # positioned there, so we skip the expensive cap.set() seek.
+        # -2 = cap position unknown (force a seek on next read).
+        self._last_decoded_idx: int = -2
+        # Pending render request set by callbacks; consumed by the main loop
+        # AFTER render_dearpygui_frame() returns.  This decouples video I/O
+        # from DearPyGui callback context, preventing macOS segfaults.
+        self._needs_render: Optional[int] = None
 
         # ── Overlay toggles ───────────────────────────────────────────
         self.show_players = True
@@ -140,7 +178,7 @@ class Viewer:
 
         # ── Heatmap cfg (minimal subset needed for rendering) ─────────
         self._heat_cfg = SimpleNamespace(
-            court_insert_h=200,
+            court_insert_h=300,
             court_real_width_cm=610.0,
             court_real_length_cm=1340.0,
             player_heatmap_blur=7,
@@ -213,8 +251,16 @@ class Viewer:
     # ------------------------------------------------------------------
 
     def _read_frame(self, idx: int) -> Optional[np.ndarray]:
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, float(idx))
+        """Read frame at idx.  Skips cap.set() when reading sequentially
+        (idx == last_decoded + 1) to avoid expensive keyframe seeks."""
+        if idx != self._last_decoded_idx + 1:
+            try:
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, float(idx))
+            except Exception:
+                # cap.set() can raise on macOS / certain codecs; mark dirty
+                self._last_decoded_idx = -2
         ok, frame = self.cap.read()
+        self._last_decoded_idx = idx if ok else -2
         return frame if ok else None
 
     def _player_color(self, pid: int) -> Tuple[int, int, int]:
@@ -282,18 +328,19 @@ class Viewer:
                     cv2.circle(canvas, (fx, fy), 5, (0, 0, 0), -1, cv2.LINE_AA)
                     cv2.circle(canvas, (fx, fy), 4, color, -1, cv2.LINE_AA)
 
-        # ── Shuttle glow ──────────────────────────────────────────────
+        # ── Shuttle ring ──────────────────────────────────────────────
         if self.show_shuttle and shuttle_j is not None:
-            cx = int(shuttle_j["x"] + shuttle_j["w"] / 2)
-            cy = int(shuttle_j["y"] + shuttle_j["h"] / 2)
-            # Outer soft glow (drawn first, darkened)
-            for r, alpha in [(18, 0.06), (13, 0.10), (9, 0.18)]:
-                glow = canvas.copy()
-                cv2.circle(glow, (cx, cy), r, OCV_SHUT, -1, cv2.LINE_AA)
-                cv2.addWeighted(glow, alpha, canvas, 1 - alpha, 0, canvas)
-            # Solid core
-            cv2.circle(canvas, (cx, cy), 5, OCV_SHUT, -1, cv2.LINE_AA)
-            cv2.circle(canvas, (cx, cy), 5, (0, 0, 0), 1, cv2.LINE_AA)
+            cx  = int(shuttle_j["x"] + shuttle_j["w"] / 2)
+            cy  = int(shuttle_j["y"] + shuttle_j["h"] / 2)
+            # Ring radius: slightly larger than the 16-px detection box.
+            ring_r = max(14, int(max(shuttle_j.get("w", 16),
+                                    shuttle_j.get("h", 16)) * 0.85))
+            # Black shadow for contrast on any background
+            cv2.circle(canvas, (cx, cy), ring_r + 2, (0, 0, 0),   3, cv2.LINE_AA)
+            # Bold red-orange ring (BGR: 0, 60, 255)
+            cv2.circle(canvas, (cx, cy), ring_r,     (0, 60, 255), 2, cv2.LINE_AA)
+            # Small cross-hair dot at centre
+            cv2.circle(canvas, (cx, cy), 3,          (0, 60, 255), -1, cv2.LINE_AA)
 
         # ── Hit flash ─────────────────────────────────────────────────
         if self.show_hits and hit_events:
@@ -325,21 +372,28 @@ class Viewer:
         cv2.putText(canvas, pill_txt, (15, 10 + ph + 2),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.46, pill_tcol, 1, cv2.LINE_AA)
 
-        # ── Court heatmap insert (bottom-right) ───────────────────────
-        if self.show_heatmap:
+        # ── Court heatmap insert (bottom-right corner of video) ──────
+        if self.show_heatmap and _HAS_VISUALIZATION:
             try:
-                from utils.visualization import render_court_insert
                 history = self._history_at(idx)
                 sorted_ids = sorted(history.keys())[:2]
                 display_history = {pid: history[pid] for pid in sorted_ids if history[pid]}
                 if display_history:
-                    insert = render_court_insert(display_history, self._heat_cfg)
+                    insert = _render_court_insert(display_history, self._heat_cfg)
                     ih, iw = insert.shape[:2]
-                    if ih <= fh and iw <= fw:
-                        roi = canvas[fh - ih:fh, fw - iw:fw]
-                        cv2.addWeighted(insert, 0.88, roi, 0.12, 0, roi)
-            except Exception:
-                pass
+                    margin = 8
+                    y0 = fh - ih - margin
+                    x0 = fw - iw - margin
+                    if y0 >= 0 and x0 >= 0:
+                        roi = canvas[y0:y0 + ih, x0:x0 + iw]
+                        cv2.addWeighted(insert, 0.92, roi, 0.08, 0, roi)
+                        # Thin white border so the insert is clearly visible
+                        cv2.rectangle(canvas,
+                                      (x0 - 1, y0 - 1),
+                                      (x0 + iw, y0 + ih),
+                                      (200, 200, 200), 1, cv2.LINE_AA)
+            except Exception as _e:
+                pass  # non-fatal; heatmap just won't show
 
         return canvas
 
@@ -347,10 +401,14 @@ class Viewer:
     # Texture management
     # ------------------------------------------------------------------
 
-    def _frame_to_rgba_flat(self, frame: np.ndarray) -> List[float]:
-        rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        rgba = cv2.cvtColor(rgb, cv2.COLOR_RGB2RGBA)
-        return (rgba.astype(np.float32) / 255.0).flatten().tolist()
+    def _frame_to_rgba_flat(self, frame: np.ndarray) -> np.ndarray:
+        """Convert BGR frame to flat float32 RGBA for DearPyGui texture upload.
+
+        Returns a contiguous float32 numpy array (no Python list conversion)
+        which DearPyGui accepts directly and is ~10x faster than .tolist().
+        """
+        rgba = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+        return np.ascontiguousarray(rgba, dtype=np.float32) / 255.0
 
     def _init_texture(self, w: int, h: int) -> None:
         self._tex_w = w
@@ -489,41 +547,54 @@ class Viewer:
 
     def _seek(self, idx: int) -> None:
         self.frame_idx = max(0, min(self.total_frames - 1, idx))
+        # Any manual seek invalidates the sequential-read position.
+        self._last_decoded_idx = -2
         dpg.set_value("sl_frame", self.frame_idx)
-        self._push_frame(self.frame_idx)
+        # DO NOT call _push_frame here — we are inside a DearPyGui callback
+        # (fired from render_dearpygui_frame).  Doing video I/O from inside
+        # the DearPyGui render pass causes a macOS segfault.  Instead, set a
+        # flag that the main loop processes after render_dearpygui_frame returns.
+        self._needs_render = self.frame_idx
 
     def _cb_play_pause(self) -> None:
         self.playing = not self.playing
+        if self.playing:
+            # Reset tick so stale elapsed time doesn't cause an instant multi-frame skip.
+            self._last_tick = time.perf_counter()
         dpg.configure_item("btn_play",
-                           label="⏸  Pause" if self.playing else "▶  Play")
+                           label="|| Pause" if self.playing else "> Play")
 
-    def _cb_prev(self)      -> None: self._seek(self.frame_idx - 1)
-    def _cb_next(self)      -> None: self._seek(self.frame_idx + 1)
-    def _cb_skip_b(self)    -> None: self._seek(self.frame_idx - 10)
-    def _cb_skip_f(self)    -> None: self._seek(self.frame_idx + 10)
-    def _cb_first(self)     -> None: self._seek(0)
-    def _cb_last(self)      -> None: self._seek(self.total_frames - 1)
+    def _cb_prev(self)       -> None: self._seek(self.frame_idx - 1)
+    def _cb_next(self)       -> None: self._seek(self.frame_idx + 1)
+    def _cb_skip_b(self)     -> None: self._seek(self.frame_idx - 10)
+    def _cb_skip_f(self)     -> None: self._seek(self.frame_idx + 10)
+    def _cb_skip_b5s(self)   -> None: self._seek(self.frame_idx - int(5  * self.source_fps))
+    def _cb_skip_f5s(self)   -> None: self._seek(self.frame_idx + int(5  * self.source_fps))
+    def _cb_skip_b10s(self)  -> None: self._seek(self.frame_idx - int(10 * self.source_fps))
+    def _cb_skip_f10s(self)  -> None: self._seek(self.frame_idx + int(10 * self.source_fps))
+    def _cb_first(self)      -> None: self._seek(0)
+    def _cb_last(self)       -> None: self._seek(self.total_frames - 1)
 
     def _cb_frame_slider(self, _, val: int)   -> None: self._seek(int(val))
     def _cb_speed(self,        _, val: float) -> None: self.speed = float(val)
 
     def _cb_tog_players(self, _, v) -> None:
-        self.show_players = v; self._push_frame(self.frame_idx)
+        self.show_players = v; self._needs_render = self.frame_idx
     def _cb_tog_shuttle(self, _, v) -> None:
-        self.show_shuttle = v; self._push_frame(self.frame_idx)
+        self.show_shuttle = v; self._needs_render = self.frame_idx
     def _cb_tog_hits(self, _, v)    -> None:
-        self.show_hits    = v; self._push_frame(self.frame_idx)
+        self.show_hits    = v; self._needs_render = self.frame_idx
     def _cb_tog_heatmap(self, _, v) -> None:
-        self.show_heatmap = v; self._push_frame(self.frame_idx)
+        self.show_heatmap = v; self._needs_render = self.frame_idx
 
     def _cb_key(self, _, key: int) -> None:
-        if   key == dpg.mvKey_Space:  self._cb_play_pause()
-        elif key == dpg.mvKey_Right:  self._cb_next()
-        elif key == dpg.mvKey_Left:   self._cb_prev()
-        elif key == dpg.mvKey_Next:   self._cb_skip_f()
-        elif key == dpg.mvKey_Prior:  self._cb_skip_b()
-        elif key == dpg.mvKey_Home:   self._cb_first()
-        elif key == dpg.mvKey_End:    self._cb_last()
+        if   key == dpg.mvKey_Spacebar: self._cb_play_pause()
+        elif key == dpg.mvKey_Right:    self._cb_next()
+        elif key == dpg.mvKey_Left:     self._cb_prev()
+        elif key == dpg.mvKey_Next:     self._cb_skip_f()
+        elif key == dpg.mvKey_Prior:    self._cb_skip_b()
+        elif key == dpg.mvKey_Home:     self._cb_first()
+        elif key == dpg.mvKey_End:      self._cb_last()
         elif key == dpg.mvKey_H:      dpg.set_value("chk_players", not self.show_players); self._cb_tog_players(None, not self.show_players)
         elif key == dpg.mvKey_S:      dpg.set_value("chk_shuttle", not self.show_shuttle); self._cb_tog_shuttle(None, not self.show_shuttle)
         elif key == dpg.mvKey_E:      dpg.set_value("chk_hits",    not self.show_hits);    self._cb_tog_hits(None, not self.show_hits)
@@ -588,15 +659,19 @@ class Viewer:
                     )
 
                     self._section_label("PLAYBACK")
+                    # Row 1: boundary jump + play/pause (frame-step arrows removed;
+                    # use Left/Right keyboard keys for single-frame step)
                     with dpg.group(horizontal=True):
-                        dpg.add_button(label="|◀", width=30, callback=self._cb_first,  tag="btn_first")
-                        dpg.add_button(label="⏮", width=30, callback=self._cb_skip_b,  tag="btn_skipb")
-                        dpg.add_button(label="◀",  width=28, callback=self._cb_prev,    tag="btn_prev")
-                        dpg.add_button(label="▶  Play", width=76,
-                                       callback=self._cb_play_pause, tag="btn_play")
-                        dpg.add_button(label="▶",  width=28, callback=self._cb_next,    tag="btn_next")
-                        dpg.add_button(label="⏭", width=30, callback=self._cb_skip_f,  tag="btn_skipf")
-                        dpg.add_button(label="▶|", width=30, callback=self._cb_last,    tag="btn_last")
+                        dpg.add_button(label="|<",     width=32, callback=self._cb_first,      tag="btn_first")
+                        dpg.add_button(label="> Play", width=90, callback=self._cb_play_pause, tag="btn_play")
+                        dpg.add_button(label=">|",     width=32, callback=self._cb_last,        tag="btn_last")
+                    # Row 2: time-based skip buttons
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="-10s", width=46, callback=self._cb_skip_b10s, tag="btn_skip_b10s")
+                        dpg.add_button(label="-5s",  width=40, callback=self._cb_skip_b5s,  tag="btn_skip_b5s")
+                        dpg.add_spacer(width=10)
+                        dpg.add_button(label="+5s",  width=40, callback=self._cb_skip_f5s,  tag="btn_skip_f5s")
+                        dpg.add_button(label="+10s", width=46, callback=self._cb_skip_f10s, tag="btn_skip_f10s")
 
                     dpg.add_slider_int(
                         tag="sl_frame",
@@ -643,9 +718,9 @@ class Viewer:
                     self._section_label("KEYBOARD")
                     for k, v in [
                         ("Space",    "Play / Pause"),
-                        ("← →",      "Step frame"),
-                        ("PgUp/Dn",  "±10 frames"),
-                        ("Home/End", "First/Last"),
+                        ("<- ->",    "Step frame"),
+                        ("PgUp/Dn", "±10 frames"),
+                        ("Home/End", "First / Last"),
                         ("H S E M",  "Toggle overlays"),
                         ("Q / Esc",  "Quit"),
                     ]:
@@ -755,20 +830,35 @@ class Viewer:
         while dpg.is_dearpygui_running():
             now = time.perf_counter()
 
+            # ── Playback advance ─────────────────────────────────────────
             if self.playing:
                 interval = 1.0 / max(self.source_fps * self.speed, 0.1)
                 if (now - self._last_tick) >= interval:
-                    self._last_tick = now
-                    next_idx = self.frame_idx + 1
+                    # Advance by however many intervals elapsed (frame-skip
+                    # when rendering is slow) to prevent speed drift.
+                    frames_elapsed = max(1, int((now - self._last_tick) / interval))
+                    self._last_tick += frames_elapsed * interval
+                    next_idx = self.frame_idx + frames_elapsed
                     if next_idx >= self.total_frames:
                         next_idx = self.total_frames - 1
                         self.playing = False
-                        dpg.configure_item("btn_play", label="▶  Play")
+                        dpg.configure_item("btn_play", label="> Play")
                     self.frame_idx = next_idx
                     dpg.set_value("sl_frame", self.frame_idx)
+                    # _push_frame here is safe: we are NOT inside
+                    # render_dearpygui_frame — the DearPyGui pass hasn't started.
                     self._push_frame(self.frame_idx)
 
+            # ── DearPyGui render pass (callbacks fire here) ──────────────
             dpg.render_dearpygui_frame()
+
+            # ── Dequeue pending seek requested by button/key callbacks ───
+            # Video I/O happens HERE, safely outside the DearPyGui render
+            # pass, so cap.set()/cap.read() cannot re-enter and segfault.
+            if self._needs_render is not None:
+                idx = self._needs_render
+                self._needs_render = None
+                self._push_frame(idx)
 
         self.cap.release()
         dpg.destroy_context()

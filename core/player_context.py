@@ -20,6 +20,7 @@ Interface (what callers need to know):
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Optional, Tuple
 
 from core.tracking_types import Player
@@ -31,14 +32,25 @@ class PlayerContext:
     Usage per frame:
         players = ctx.update(raw_yolo_dicts, court_mapper)
         insert  = render_court_insert(ctx.get_feet_history(2), cfg)
+
+    Player identity is capped at exactly 2 slots (P1, P2).  Once both slots
+    are filled, any new ByteTrack ID that appears (due to re-ID after
+    occlusion) is remapped to whichever existing player's last-known feet
+    position is spatially closest to the new detection.  This prevents P3/P4/…
+    from ever being registered.
     """
 
     def __init__(self) -> None:
         # Ordered list of ByteTrack IDs in first-appearance order.
         # Invariant: once appended, order never changes — P1/P2 are stable.
+        # Maximum length is capped at 2.
         self._seen_ids: List[int] = []
         # Cumulative real-world feet positions per player ID.
         self._feet_history: Dict[int, List[Tuple[float, float]]] = {}
+        # Last pixel feet position per registered player ID (for remapping).
+        self._last_feet_px: Dict[int, Tuple[float, float]] = {}
+        # Map: unknown/new ByteTrack ID → established player ID
+        self._id_remap: Dict[int, int] = {}
 
     # ------------------------------------------------------------------
     # Public interface
@@ -62,16 +74,31 @@ class PlayerContext:
         )
 
         for d in raw_detections:
-            pid = int(d["id"])
-
-            # Register new IDs in stable appearance order
-            if pid not in self._seen_ids:
-                self._seen_ids.append(pid)
+            raw_pid = int(d["id"])
 
             feet_px: Tuple[float, float] = (
                 float(d["feet"][0]),
                 float(d["feet"][1]),
             )
+
+            # ── ID assignment / remapping ──────────────────────────────
+            if raw_pid in self._seen_ids:
+                # Known established player — use as-is.
+                pid = raw_pid
+            elif raw_pid in self._id_remap:
+                # Previously remapped transient ID.
+                pid = self._id_remap[raw_pid]
+            elif len(self._seen_ids) < 2:
+                # Still have open slots — register this as a new player.
+                self._seen_ids.append(raw_pid)
+                pid = raw_pid
+            else:
+                # Both slots filled; remap to the spatially nearest player.
+                pid = self._nearest_player(feet_px)
+                self._id_remap[raw_pid] = pid
+
+            # Update last known pixel position for the established slot.
+            self._last_feet_px[pid] = feet_px
 
             feet_real: Optional[Tuple[float, float]] = None
             if calibrated:
@@ -139,7 +166,32 @@ class PlayerContext:
         """All seen ByteTrack IDs in first-appearance order (read-only copy)."""
         return list(self._seen_ids)
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _nearest_player(self, feet_px: Tuple[float, float]) -> int:
+        """Return the established player ID whose last known feet position
+        is closest (Euclidean, pixel space) to *feet_px*.
+
+        Called only when both P1/P2 slots are filled.  Falls back to
+        self._seen_ids[0] if no last_feet_px is recorded yet.
+        """
+        best_id   = self._seen_ids[0]
+        best_dist = float("inf")
+        fx, fy    = feet_px
+        for pid in self._seen_ids:
+            if pid in self._last_feet_px:
+                lx, ly = self._last_feet_px[pid]
+                dist   = math.hypot(fx - lx, fy - ly)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_id   = pid
+        return best_id
+
     def reset(self) -> None:
         """Clear all state (useful for unit tests)."""
         self._seen_ids.clear()
         self._feet_history.clear()
+        self._last_feet_px.clear()
+        self._id_remap.clear()
