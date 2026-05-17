@@ -37,8 +37,8 @@ mkdir -p data/output/logs
 # Use absolute path to venv (required for compute nodes)
 source /users/zshen38/badminton_vision/.venv/bin/activate
 
-# Use uv run with verbose and unbuffered output flags (like slayminton)
-PYTHON="uv run -v python -u"
+# Use python directly from the activated venv
+PYTHON="python -u"
 
 # Sanity-check: abort immediately if torch is missing rather than failing deep
 # inside a subprocess with a cryptic error.
