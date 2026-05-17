@@ -1,9 +1,6 @@
 /data/input
 /data/output
 
-AGENTS.md
-PRD.md
-ISSUES.md
 */__pycache__
 *.pyc
 *.pyo
