@@ -33,6 +33,9 @@ rally_motion_required_streak: 3
 rally_max_displacement_fraction: 0.1667  # 1/6 of max(frame_h, frame_w)
 rally_min_displacement_px: 2.0
 rally_stable_frame_threshold: 5
+rally_min_duration_s: 0.5         # discard rallies shorter than this (hard floor)
+rally_detection_grace_frames: 3   # frames of no detection before expiring motion timestamp
+rally_min_hits: 1                 # rallies with fewer confirmed hits are discarded
 
 # ─── Player tracking ─────────────────────────────────────────────────────────
 player_conf_threshold: 0.5

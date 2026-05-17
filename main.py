@@ -65,7 +65,7 @@ def run(
     from models.player_yolo import PlayerDetector
     from models.stroke_classifier import StrokeClassifier
     from core.homography import CourtMapper
-    from core.game_state import GameState
+    from core.game_state import GameState, build_rally_status_per_frame
     from core.hit_detector import HitDetector
     from core.analysis import Analysis
     from core.player_context import PlayerContext
@@ -204,7 +204,22 @@ def run(
 
     # ── Finalize ──────────────────────────────────────────────────────────────
     game_state.finalize_rally_data(final_timestamp)
-    rally_data = game_state.get_rally_data()
+    raw_rally_data = game_state.get_rally_data()
+
+    # Second-pass consolidation: merge short inactive gaps (<0.5s) that slipped
+    # past the in-loop grace period.  This turns the dead build_rally_status_per_frame
+    # function into the active post-processor it was always meant to be.
+    min_period_s = float(getattr(cfg, "rally_min_period_s", 0.5))
+    _, rally_data = build_rally_status_per_frame(
+        raw_rally_data,
+        total_frames=len(tracking_results),
+        fps=source_fps,
+        min_period_s=min_period_s,
+    )
+    print(
+        f"[MAIN] rally consolidation: {len(raw_rally_data)} raw → {len(rally_data)} consolidated"
+    )
+
     analytics = analysis.compute_rally_statistics(rally_data)
     analysis.visualize_results((analytics, run_dir))
 

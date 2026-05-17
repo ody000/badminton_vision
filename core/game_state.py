@@ -3,6 +3,20 @@ Tracks rally status, score, and hit counts.
 
 Direct port of slayminton/core/game_state.py.
 Only change: __init__ accepts a cfg parameter to read thresholds from config.
+
+Improvements over the original port:
+- end_rally() resets all tracking state (last_center, motion_streak,
+  position_history, last_motion_timestamp) to prevent stale state from
+  bleeding into the next rally.
+- _record_rally_segment() enforces a hard minimum duration (rally_min_duration_s)
+  and a minimum confirmed-hit count (rally_min_hits) before recording.
+- update() implements a grace-period counter: up to rally_detection_grace_frames
+  consecutive missed detections are tolerated mid-rally without resetting the
+  motion streak or expiring last_motion_timestamp.
+- First-detection streak bypass is removed: motion_streak starts at 1 on the
+  first detection and must climb to motion_required_streak normally. Once the
+  streak is confirmed, current_rally_start_timestamp is back-filled to the
+  timestamp of the first detection in the streak so rally boundaries are accurate.
 """
 
 from __future__ import annotations
@@ -17,7 +31,12 @@ ShuttleTuple = Tuple[float, float, float, float, float]
 
 
 class GameState:
-    def __init__(self, cfg=None, inactive_timeout_s: float = 1.0, min_displacement_px: float = 2.0):
+    def __init__(
+        self,
+        cfg=None,
+        inactive_timeout_s: float = 1.0,
+        min_displacement_px: float = 2.0,
+    ):
         # Read from cfg if provided; explicit args act as fallback defaults.
         if cfg is not None:
             inactive_timeout_s = float(getattr(cfg, "rally_inactive_timeout_s", inactive_timeout_s))
@@ -25,10 +44,16 @@ class GameState:
             motion_required_streak = int(getattr(cfg, "rally_motion_required_streak", 3))
             max_displacement_fraction = float(getattr(cfg, "rally_max_displacement_fraction", 1.0 / 6.0))
             stable_frame_threshold = int(getattr(cfg, "rally_stable_frame_threshold", 5))
+            min_duration_s = float(getattr(cfg, "rally_min_duration_s", 0.5))
+            detection_grace_frames = int(getattr(cfg, "rally_detection_grace_frames", 3))
+            min_hits = int(getattr(cfg, "rally_min_hits", 1))
         else:
             motion_required_streak = 3
             max_displacement_fraction = 1.0 / 6.0
             stable_frame_threshold = 5
+            min_duration_s = 0.5
+            detection_grace_frames = 3
+            min_hits = 1
 
         # Motion-based rally rule config.
         self.inactive_timeout_s = float(inactive_timeout_s)
@@ -50,9 +75,15 @@ class GameState:
         self.last_hit_timestamp: Optional[float] = None
         self.hit_cooldown_s = 0.2
 
-        # Motion-debounce
+        # Motion-debounce: require this many consecutive frames of real motion
+        # before starting a rally.  The first-detection bypass is gone — streak
+        # starts at 1 on the first detection and must reach motion_required_streak.
         self.motion_streak: int = 0
         self.motion_required_streak: int = motion_required_streak
+
+        # Streak candidate: timestamp of the first frame of the current streak,
+        # used to back-fill current_rally_start_timestamp once confirmed.
+        self._streak_start_timestamp: Optional[float] = None
 
         # Stability detector
         self.stable_frames: int = 0
@@ -61,9 +92,24 @@ class GameState:
         # Large displacement filter
         self.max_displacement_fraction: float = max_displacement_fraction
 
+        # Hard minimum rally duration — rallies shorter than this are discarded.
+        self.min_duration_s: float = min_duration_s
+
+        # Minimum confirmed hit count — rallies with fewer hits are discarded.
+        self.min_hits: int = min_hits
+
+        # Grace period: tolerate up to this many consecutive missed detections
+        # mid-rally before treating them as a genuine loss of shuttle.
+        self.detection_grace_frames: int = detection_grace_frames
+        self._miss_streak: int = 0   # consecutive frames where center == None
+
         # Internal state flags (used by update() logic only)
         self.last_detection_discarded: bool = False
         self.consecutive_stationary_frames: int = 0
+
+    # ------------------------------------------------------------------
+    # Rally lifecycle
+    # ------------------------------------------------------------------
 
     def start_rally(self):
         self.rally_active = True
@@ -75,16 +121,63 @@ class GameState:
             print(f"[GAME] rally_start t={ts:.3f}s")
 
     def end_rally(self, winner=None):
+        """End the current rally and reset ALL per-rally tracking state.
+
+        Resetting last_center, motion_streak, position_history, and
+        last_motion_timestamp prevents stale values from the ending rally
+        from leaking into the next detection cycle.
+        """
         if winner in self.score:
             self.score[winner] += 1
         self.rally_active = False
         self.hit_count = 0
+
+        # Full state reset — this is the key fix.
+        self.last_center = None
+        self.last_motion_timestamp = None
+        self.motion_streak = 0
+        self._streak_start_timestamp = None
+        self.position_history.clear()
+        self._miss_streak = 0
+        self.stable_frames = 0
+        self.consecutive_stationary_frames = 0
+
         print("[GAME] rally_end")
 
     def _record_rally_segment(self, end_timestamp: float):
+        """Record a rally segment if it passes quality gates.
+
+        Gates (all must pass):
+          1. current_rally_start_timestamp must be set.
+          2. duration_s >= min_duration_s  (hard floor, default 0.5s).
+          3. hit_count >= min_hits          (default 1 confirmed hit).
+
+        Rallies that fail a gate are silently discarded and logged.
+        """
         if self.current_rally_start_timestamp is None:
             return
+
         duration_s = max(float(end_timestamp) - float(self.current_rally_start_timestamp), 0.0)
+
+        # Gate 1: minimum duration
+        if duration_s < self.min_duration_s:
+            print(
+                f"[GAME] rally_discarded (too short: {duration_s:.3f}s < {self.min_duration_s}s) "
+                f"start={self.current_rally_start_timestamp:.3f}s end={float(end_timestamp):.3f}s"
+            )
+            self.current_rally_start_timestamp = None
+            return
+
+        # Gate 2: minimum hit count
+        if self.hit_count < self.min_hits:
+            print(
+                f"[GAME] rally_discarded (too few hits: {self.hit_count} < {self.min_hits}) "
+                f"start={self.current_rally_start_timestamp:.3f}s end={float(end_timestamp):.3f}s "
+                f"duration={duration_s:.3f}s"
+            )
+            self.current_rally_start_timestamp = None
+            return
+
         self.rally_data.append(
             {
                 "rally_id": len(self.rally_data) + 1,
@@ -96,7 +189,7 @@ class GameState:
         print(
             f"[GAME] rally_segment id={len(self.rally_data)} "
             f"start={self.current_rally_start_timestamp:.3f}s end={float(end_timestamp):.3f}s "
-            f"duration={duration_s:.3f}s"
+            f"duration={duration_s:.3f}s hits={self.hit_count}"
         )
         self.current_rally_start_timestamp = None
 
@@ -108,11 +201,9 @@ class GameState:
             else:
                 print(f"[GAME] hit count={self.hit_count}")
 
-    # should_visualize_shuttle() removed — rendering decisions belong in the
-    # visualization layer, not in game state.  Callers that need to suppress
-    # the shuttle dot can inspect last_detection_discarded and
-    # consecutive_stationary_frames directly, or use the shuttle field in
-    # tracking_results.json (None when discarded).
+    # ------------------------------------------------------------------
+    # Shuttle helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _center_from_shuttle(shuttle_det: Optional[ShuttleTuple]) -> Optional[Tuple[float, float]]:
@@ -164,33 +255,77 @@ class GameState:
             return True
         return False
 
+    # ------------------------------------------------------------------
+    # Main update loop
+    # ------------------------------------------------------------------
+
     def update(
         self,
         timestamp: float,
         shuttle_det: Optional[ShuttleTuple],
         frame_size: Optional[Tuple[int, int]] = None,
     ) -> bool:
+        """Update state from one frame; return current rally_active.
+
+        Key behaviours vs original port
+        ────────────────────────────────
+        Grace period
+            Up to detection_grace_frames consecutive frames with no detection
+            are silently tolerated mid-rally.  The miss streak counter is
+            incremented but last_motion_timestamp is NOT aged until the grace
+            window expires.  This prevents TrackNet's natural ~10% miss rate
+            from fragmenting rallies.
+
+        First-detection streak
+            On the first shuttle detection after a cold start (last_center is
+            None), motion_streak is set to 1 — not immediately to
+            motion_required_streak.  The streak must count up normally.  Once
+            it reaches motion_required_streak, current_rally_start_timestamp
+            is back-filled to _streak_start_timestamp (the first frame of the
+            streak) so the recorded rally boundary is accurate.
+
+        Args:
+            timestamp:   Current frame time in seconds.
+            shuttle_det: (ts, x, y, w, h) from TrackNet, or None.
+            frame_size:  Optional (height, width) for large-displacement filter.
+        """
         center = self._center_from_shuttle(shuttle_det)
         self.last_detection_discarded = False
 
+        # ── No detection this frame ────────────────────────────────────────────
         if center is None:
+            self._miss_streak += 1
             self.stable_frames = 0
-            self.consecutive_stationary_frames = 0
+
+            if self._miss_streak > self.detection_grace_frames:
+                # Grace window exhausted — treat as genuine loss of shuttle.
+                # Don't reset motion_streak here; let the inactive_timeout below
+                # handle rally termination naturally.
+                self.consecutive_stationary_frames = 0
+
+            # Either way, fall through to the timeout check below.
+
+        # ── Detection present ──────────────────────────────────────────────────
         else:
+            self._miss_streak = 0  # reset grace counter on any real detection
+
             if self.last_center is not None:
                 dx = center[0] - self.last_center[0]
                 dy = center[1] - self.last_center[1]
                 displacement = math.hypot(dx, dy)
 
+                # Large-displacement filter: impossible inter-frame jump → reject.
                 if frame_size is not None:
                     fh, fw = frame_size
                     max_allowed = max(fh, fw) * self.max_displacement_fraction
                     if displacement > max_allowed:
                         self.motion_streak = 0
+                        self._streak_start_timestamp = None
                         self.last_detection_discarded = True
                         self.consecutive_stationary_frames = 0
                         return self.rally_active
 
+                # Stability: exactly-unchanged center for many frames → background.
                 if displacement < 1e-3:
                     self.stable_frames += 1
                     self.consecutive_stationary_frames += 1
@@ -198,57 +333,79 @@ class GameState:
                         if self.rally_active:
                             self._record_rally_segment(timestamp)
                             self.end_rally()
-                        self.last_center = None
-                        self.last_motion_timestamp = None
-                        self.position_history.clear()
-                        self.motion_streak = 0
-                        self.consecutive_stationary_frames = 0
+                        else:
+                            # Not in rally but tracking got stuck — hard reset.
+                            self.last_center = None
+                            self.last_motion_timestamp = None
+                            self.position_history.clear()
+                            self.motion_streak = 0
+                            self._streak_start_timestamp = None
+                            self.consecutive_stationary_frames = 0
                         return self.rally_active
                 else:
                     self.stable_frames = 0
                     self.consecutive_stationary_frames = 0
 
+            # Accept detection into history.
             self.position_history.append((timestamp, center[0], center[1]))
             if len(self.position_history) > self.history_max_len:
                 self.position_history.pop(0)
 
             if self.last_center is None:
-                self.motion_streak = self.motion_required_streak
-                self.last_motion_timestamp = timestamp
-                if not self.rally_active:
-                    self.current_rally_start_timestamp = timestamp
-                self.start_rally()
+                # ── First detection after cold-start / post-rally reset ───────
+                # Streak starts at 1; _streak_start_timestamp marks this frame
+                # so we can back-fill the rally start once the streak confirms.
+                self.motion_streak = 1
+                self._streak_start_timestamp = timestamp
                 self.consecutive_stationary_frames = 0
             else:
+                # ── Subsequent detection ──────────────────────────────────────
                 dx = center[0] - self.last_center[0]
                 dy = center[1] - self.last_center[1]
                 displacement = math.hypot(dx, dy)
 
                 if displacement >= self.min_displacement_px:
                     self.motion_streak = min(self.motion_streak + 1, self.motion_required_streak)
+                    self.consecutive_stationary_frames = 0
+
                     if self.motion_streak >= self.motion_required_streak:
                         self.last_motion_timestamp = timestamp
+
                         if not self.rally_active:
-                            self.current_rally_start_timestamp = timestamp
+                            # Back-fill start to the first frame of the confirmed streak.
+                            self.current_rally_start_timestamp = (
+                                self._streak_start_timestamp
+                                if self._streak_start_timestamp is not None
+                                else timestamp
+                            )
                             self.start_rally()
+
                         if self._detect_hit(center, timestamp):
                             self.record_hit()
-                    self.consecutive_stationary_frames = 0
                 else:
+                    # Small movement (jitter) — reset streak but keep position history.
                     self.motion_streak = 0
+                    self._streak_start_timestamp = None
                     self.consecutive_stationary_frames += 1
 
             self.last_center = center
 
+        # ── Inactive timeout check ─────────────────────────────────────────────
         if self.rally_active:
             if self.last_motion_timestamp is None:
                 self._record_rally_segment(timestamp)
                 self.end_rally()
             elif (timestamp - self.last_motion_timestamp) >= self.inactive_timeout_s:
-                self._record_rally_segment(timestamp)
+                # Pin end to the last confirmed-motion timestamp so duration
+                # is not inflated by the 1s of silence that triggered this.
+                self._record_rally_segment(self.last_motion_timestamp)
                 self.end_rally()
 
         return self.rally_active
+
+    # ------------------------------------------------------------------
+    # Compatibility wrapper
+    # ------------------------------------------------------------------
 
     def update_game_state(
         self,
@@ -279,7 +436,12 @@ class GameState:
             self.end_rally()
         return self.rally_active
 
+    # ------------------------------------------------------------------
+    # Finalization
+    # ------------------------------------------------------------------
+
     def finalize_rally_data(self, final_timestamp: float):
+        """Close any open rally at end-of-stream."""
         if self.rally_active:
             self._record_rally_segment(final_timestamp)
             self.end_rally()
@@ -289,21 +451,39 @@ class GameState:
         return list(self.rally_data)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Post-processing consolidation (called from main.py after get_rally_data())
+# ──────────────────────────────────────────────────────────────────────────────
+
 def build_rally_status_per_frame(
     rally_data: list,
     total_frames: int,
     fps: float,
+    min_period_s: float = 0.5,
 ) -> tuple[list[bool], list]:
-    """Build a per-frame rally active status and consolidated rally data.
+    """Build per-frame rally status and consolidate short inactive gaps.
 
-    Consolidates short inactive gaps (<0.5s) into surrounding active periods.
+    Any inactive gap shorter than min_period_s that is flanked by active rally
+    periods is merged into those rally periods.  This is a second pass of
+    gap-bridging that operates on the full recorded rally list rather than
+    frame-by-frame, catching cases the in-loop grace period can't handle (e.g.
+    a gap that straddles the grace window boundary).
+
+    Args:
+        rally_data:    List of rally dicts from GameState.get_rally_data().
+        total_frames:  Total frames in the video.
+        fps:           Video frame rate.
+        min_period_s:  Minimum inactive-gap duration to keep as a gap; shorter
+                       gaps are merged.  Default 0.5s (matches config).
+
+    Returns:
+        (per_frame_status, consolidated_rally_data)
     """
     frame_duration = 1.0 / max(fps, 1e-6)
-    min_period_duration = 0.5
-    min_period_frames = max(1, int(min_period_duration / frame_duration))
+    min_period_frames = max(1, int(min_period_s / frame_duration))
 
+    # Build frame-level boolean status from raw rally_data.
     rally_status = [False] * total_frames
-
     for rally in rally_data:
         start_frame = max(0, int(rally["start_time"] * fps))
         end_frame = min(total_frames - 1, int(rally["end_time"] * fps))
@@ -311,6 +491,7 @@ def build_rally_status_per_frame(
             if i < len(rally_status):
                 rally_status[i] = True
 
+    # Merge short False (inactive) runs that sit between True (active) runs.
     consolidated = rally_status.copy()
     i = 0
     while i < len(consolidated):
@@ -320,14 +501,18 @@ def build_rally_status_per_frame(
             i += 1
         period_len = i - start_i
 
-        if period_len < min_period_frames and current_state == False and start_i > 0:
+        if (
+            period_len < min_period_frames
+            and current_state is False
+            and start_i > 0
+        ):
             next_state = consolidated[i] if i < len(consolidated) else None
             prev_state = consolidated[start_i - 1]
-            if next_state == True or prev_state == True:
-                merge_into = True
+            if prev_state is True or next_state is True:
                 for j in range(start_i, i):
-                    consolidated[j] = merge_into
+                    consolidated[j] = True
 
+    # Rebuild structured rally list from the consolidated frame array.
     consolidated_rally_data = []
     rally_id = 1
     in_rally = False
@@ -340,23 +525,27 @@ def build_rally_status_per_frame(
         elif not is_rally and in_rally:
             rally_end = frame_idx * frame_duration
             duration = max(rally_end - rally_start, 0.0)
-            consolidated_rally_data.append({
-                "rally_id": rally_id,
-                "start_time": float(rally_start),
-                "end_time": float(rally_end),
-                "duration_s": float(duration),
-            })
+            consolidated_rally_data.append(
+                {
+                    "rally_id": rally_id,
+                    "start_time": float(rally_start),
+                    "end_time": float(rally_end),
+                    "duration_s": float(duration),
+                }
+            )
             rally_id += 1
             in_rally = False
 
     if in_rally and rally_start is not None:
         rally_end = (total_frames - 1) * frame_duration
         duration = max(rally_end - rally_start, 0.0)
-        consolidated_rally_data.append({
-            "rally_id": rally_id,
-            "start_time": float(rally_start),
-            "end_time": float(rally_end),
-            "duration_s": float(duration),
-        })
+        consolidated_rally_data.append(
+            {
+                "rally_id": rally_id,
+                "start_time": float(rally_start),
+                "end_time": float(rally_end),
+                "duration_s": float(duration),
+            }
+        )
 
     return consolidated, consolidated_rally_data
