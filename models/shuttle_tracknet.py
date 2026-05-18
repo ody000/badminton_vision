@@ -90,6 +90,10 @@ class TrackNetTracker:
 
         self.model.to(self.device).eval()
 
+        # Position history for temporal smoothing (last 5 positions)
+        self.position_history: list[tuple[float, float]] = []  # [(x, y), ...]
+        self.max_history = 5
+
     def set_fps(self, fps: float) -> None:
         """Update the fps used for timestamp-gap flush detection."""
         self.fps = float(fps)
@@ -269,11 +273,44 @@ class TrackNetTracker:
         if conf < self.conf_threshold:
             return {}
 
+        # Temporal smoothing: detect jumps and stabilize position
+        cx = x0 + bw / 2  # Center x
+        cy = y0 + bh / 2  # Center y
+
+        # Check for unrealistic jumps (> max_pixel_jump per frame at this fps)
+        if self.position_history:
+            last_x, last_y = self.position_history[-1]
+            max_pixel_jump = 150  # Max pixels per frame (adjust based on court size)
+            distance = np.sqrt((cx - last_x) ** 2 + (cy - last_y) ** 2)
+
+            if distance > max_pixel_jump:
+                # Reject this detection as likely false positive
+                # Reuse last position instead
+                cx, cy = last_x, last_y
+
+        # Add to position history
+        self.position_history.append((float(cx), float(cy)))
+        if len(self.position_history) > self.max_history:
+            self.position_history.pop(0)
+
+        # Apply median filtering on last N positions (temporal smoothing)
+        if len(self.position_history) >= 3:
+            xs = np.array([p[0] for p in self.position_history])
+            ys = np.array([p[1] for p in self.position_history])
+            cx_smooth = float(np.median(xs))
+            cy_smooth = float(np.median(ys))
+        else:
+            cx_smooth, cy_smooth = cx, cy
+
+        # Convert back to top-left corner
+        x0_smooth = cx_smooth - bw / 2
+        y0_smooth = cy_smooth - bh / 2
+
         return {
             "shuttle": (
                 float(timestamp),
-                float(x0),
-                float(y0),
+                float(x0_smooth),
+                float(y0_smooth),
                 float(bw),
                 float(bh),
             )

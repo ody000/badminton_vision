@@ -16,7 +16,7 @@ tracknet_buffer_size: 3
 tracknet_box_size: 16
 tracknet_expected_h: 288
 tracknet_expected_w: 512
-tracknet_conf_threshold: 0.0001      # was 0.001 — accept lower-confidence detections
+tracknet_conf_threshold: 0.15        # increased to reject noisy/false detections; stabilize tracking
 tracknet_weights: models/tracknet.pt
 # Batch N frames into one GPU forward pass for ~3–5× higher throughput.
 # 8 is the standard default (SageMaker/Triton Inference Server) and fits
