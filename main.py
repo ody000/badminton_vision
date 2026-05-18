@@ -116,11 +116,13 @@ def run(
     events: list[dict] = []
     final_timestamp = 0.0
 
-    # ── Batched main loop ─────────────────────────────────────────────────────
-    # Shuttle detection is batched (tracknet_batch_size frames per GPU call) for
-    # ~3–5× better GPU utilisation vs. one forward pass per frame.
-    # All downstream processing (YOLO, HitDetector, GameState) still runs
-    # frame-by-frame in temporal order inside _process_frame().
+    # ── Batched vs sequential TrackNet ────────────────────────────────────────
+    # detect_batch() amortises GPU kernel launch overhead across N frames, giving
+    # ~3–5× better GPU utilisation.  On CPU there is no hardware parallelism, so
+    # batching is strictly slower (batch assembly overhead + no latency hiding).
+    # We therefore gate it: only activate detect_batch() when running on CUDA.
+    _device_str = str(getattr(cfg, "device", "cpu")).lower()
+    _use_batched = _device_str.startswith("cuda")
     BATCH = int(getattr(cfg, "tracknet_batch_size", 8))
     frame_buffer: list[tuple] = []  # (frame_bgr, frame_idx, timestamp)
 
@@ -224,11 +226,17 @@ def run(
         frame_buffer.clear()
 
     for frame_bgr, frame_idx, timestamp in video_io.stream():
-        frame_buffer.append((frame_bgr, frame_idx, timestamp))
-        if len(frame_buffer) >= BATCH:
-            _flush_batch()
+        if _use_batched:
+            frame_buffer.append((frame_bgr, frame_idx, timestamp))
+            if len(frame_buffer) >= BATCH:
+                _flush_batch()
+        else:
+            # CPU path: sequential detect() — simpler and faster than batching on CPU.
+            shuttle_det_dict = tracknet.detect(frame_bgr, timestamp)
+            _process_frame(frame_bgr, frame_idx, timestamp, shuttle_det_dict)
 
-    _flush_batch()  # process any remaining frames (tail of video)
+    if _use_batched:
+        _flush_batch()  # process any remaining frames (tail of video)
 
     video_io.release()
 

@@ -1,15 +1,19 @@
-"""PlayerDetector: YOLOv8 + ByteTrack.
+"""PlayerDetector: YOLOv8 detection (no ByteTrack).
 
-Uses model.track() with persist=True for stable ByteTrack IDs.
+Uses model.predict() for simple per-frame detection.  ByteTrack (model.track +
+persist=True) was removed because the Kalman-state overhead exceeded the benefit
+for the 2-player, fixed-court use case, and the stale Kalman predictions after
+interval gaps caused more matching work, not less.
+
+ID assignment is now frame-local ordinal (0, 1, …) rather than persistent
+ByteTrack IDs.  PlayerContext's first-seen slot assignment still works correctly
+with ordinal IDs because it assigns P1/P2 by first-appearance order, not by the
+magnitude of the ID.
 
 Performance note:
     player_detect_interval (default 3) controls how often YOLO inference runs.
-    On frames between YOLO calls the last detection result is returned verbatim —
-    ByteTrack can extrapolate player positions across 2–3 frames without quality
-    loss for the slow-moving targets in this use case.  The savings scale linearly:
-    interval=3 reduces YOLO calls (and GPU time for player detection) by ~67%.
-
-    The device is passed explicitly to model.track() to prevent silent CPU
+    On frames between YOLO calls the last detection result is returned verbatim.
+    The device is passed explicitly to model.predict() to prevent silent CPU
     fallback in environments where Ultralytics' auto-detection misfires.
 """
 
@@ -57,12 +61,13 @@ class PlayerDetector:
         self.model = YOLO(weights)
 
     def detect(self, frame: np.ndarray) -> list[dict]:
-        """Run YOLOv8 + ByteTrack on a BGR frame.
+        """Run YOLOv8 detection on a BGR frame.
 
         YOLO inference is skipped on frames between detect_interval boundaries;
-        the previous frame's detections are returned instead.  ByteTrack's
-        internal Kalman state persists across the gap because persist=True is
-        used on every YOLO call.
+        the previous frame's detections are returned instead.
+
+        IDs are frame-local ordinals (0, 1, …) — not persistent ByteTrack IDs.
+        PlayerContext's first-seen slot assignment handles P1/P2 stability.
 
         Args:
             frame: BGR numpy frame.
@@ -80,10 +85,9 @@ class PlayerDetector:
         # It's time for a fresh YOLO inference.
         self._frames_since_detect = 1
 
-        results = self.model.track(
+        results = self.model.predict(
             frame,
-            persist=True,
-            classes=[0],  # person only
+            classes=[0],   # person only
             conf=self.conf_threshold,
             verbose=False,
             device=self.device,  # explicit — prevents silent CPU fallback on OSCAR
@@ -97,25 +101,14 @@ class PlayerDetector:
         boxes_result = results[0].boxes
         xyxy = boxes_result.xyxy.cpu().numpy() if hasattr(boxes_result.xyxy, "cpu") else np.array(boxes_result.xyxy)
 
-        # ByteTrack IDs (None before track has IDs)
-        if boxes_result.id is not None:
-            track_ids = boxes_result.id.cpu().numpy().astype(int)
-        else:
-            track_ids = list(range(len(xyxy)))
-
         for i, box_arr in enumerate(xyxy):
             x1, y1, x2, y2 = int(box_arr[0]), int(box_arr[1]), int(box_arr[2]), int(box_arr[3])
-            box = [x1, y1, x2, y2]
-            track_id = int(track_ids[i]) if i < len(track_ids) else i
-
             cx = (x1 + x2) // 2
-            feet = (cx, y2)
-
             detections.append({
-                "id": track_id,
-                "box": box,
-                "feet": feet,
-                "feet_real": None,  # populated by main.py via CourtMapper
+                "id": i,               # frame-local ordinal — no ByteTrack dependency
+                "box": [x1, y1, x2, y2],
+                "feet": (cx, y2),
+                "feet_real": None,     # populated by main.py via CourtMapper
             })
 
         self._last_detections = detections
