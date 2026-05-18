@@ -61,7 +61,7 @@ def run(
     from utils.video_io import VideoIOHandler
     from utils.visualization import render_court_insert, render_frame
     from models.shuttle_tracknet import TrackNetTracker
-    from models.player_yolo import PlayerDetector
+    from models.player_dino import PlayerDetector
     from models.stroke_classifier import StrokeClassifier
     from core.homography import CourtMapper
     from core.game_state import GameState, build_rally_status_per_frame

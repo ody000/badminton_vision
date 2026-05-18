@@ -1,7 +1,7 @@
 #!/bin/bash
 # SLURM launcher for badminton_vision training and inference.
 #
-# Modes: train-tracknet | train-yolo | train-stroke | run-main
+# Modes: train-tracknet | train-yolo | train-stroke | train-dino | run-main
 #
 # Brown OSCAR GPU partitions:
 #   gpu          — general GPU pool (V100/A100, up to 2 GPUs per job)
@@ -11,7 +11,17 @@
 # Default: 2 GPUs on the 'gpu' partition (OSCAR cap per job).
 # Common overrides:
 #
-#   # 2 GPUs, default partition
+#   # DINOv3 player detection (1 GPU, recommended)
+#   sbatch --gres=gpu:1 --mem=64G \
+#     --export=MODE=train-dino,TRAIN_DIR=data/input/train/player,EPOCHS=50,BATCH_SIZE=16,LR=5e-4 \
+#     slurm_train.sh
+#
+#   # DINOv3 with LoRA fine-tuning (faster, lower memory)
+#   sbatch --gres=gpu:1 --mem=48G \
+#     --export=MODE=train-dino,TRAIN_DIR=data/input/train/player,EPOCHS=50,BATCH_SIZE=16,LR=5e-4,USE_LORA=1,LORA_R=4,LORA_ALPHA=8 \
+#     slurm_train.sh
+#
+#   # 2 GPUs, default partition (TrackNet)
 #   sbatch --export=MODE=train-tracknet slurm_train.sh
 #
 #   # 1 GPU (faster queue time for stroke classifier)
@@ -46,6 +56,17 @@ DEVICE="${DEVICE:-cuda}"
 VIDEO_PATH="${VIDEO_PATH:-data/input/match_clip.mp4}"
 COURT_POINTS="${COURT_POINTS:-data/input/court_points.json}"
 WEIGHTS="${WEIGHTS:-}"
+
+# DINOv3 player detection training defaults
+TRAIN_DIR="${TRAIN_DIR:-data/input/train/player}"
+CHECKPOINT_NAME="${CHECKPOINT_NAME:-dino_player.pt}"
+USE_LORA="${USE_LORA:-0}"
+LORA_R="${LORA_R:-4}"
+LORA_ALPHA="${LORA_ALPHA:-8}"
+FREEZE_BACKBONE_EPOCHS="${FREEZE_BACKBONE_EPOCHS:-0}"
+PRETRAINED_BACKBONE="${PRETRAINED_BACKBONE:-}"
+LOG_EVERY="${LOG_EVERY:-10}"
+NUM_WORKERS="${NUM_WORKERS:-4}"
 
 # ── Ensure log directory exists ───────────────────────────────────────────────
 mkdir -p data/output/logs
@@ -164,6 +185,88 @@ case "${MODE}" in
         fi
         ;;
 
+    train-dino)
+        echo "[SLURM] Training DINOv3 player detector"
+        echo "[SLURM]   Train dir:         ${TRAIN_DIR}"
+        echo "[SLURM]   Output dir:        ${OUTPUT_DIR}"
+        echo "[SLURM]   Epochs:            ${EPOCHS}"
+        echo "[SLURM]   Batch size:        ${BATCH_SIZE}"
+        echo "[SLURM]   Learning rate:     ${LR}"
+        echo "[SLURM]   Use LoRA:          ${USE_LORA}"
+        if [[ "${USE_LORA}" == "1" ]]; then
+            echo "[SLURM]   LoRA r:            ${LORA_R}"
+            echo "[SLURM]   LoRA alpha:        ${LORA_ALPHA}"
+        fi
+        echo "[SLURM]   Num workers:       ${NUM_WORKERS}"
+        echo "[SLURM]   Log every:         ${LOG_EVERY}"
+
+        # Verify training data exists
+        if [[ ! -d "${TRAIN_DIR}" ]]; then
+            echo "[SLURM] ERROR: TRAIN_DIR does not exist: ${TRAIN_DIR}"
+            exit 1
+        fi
+
+        ANNOTATIONS_FILE="${TRAIN_DIR}/_annotations.coco.json"
+        if [[ ! -f "${ANNOTATIONS_FILE}" ]]; then
+            echo "[SLURM] ERROR: COCO annotations file not found: ${ANNOTATIONS_FILE}"
+            exit 1
+        fi
+
+        # Create output directory
+        mkdir -p "${OUTPUT_DIR}"
+
+        # Build Python training script (inline to avoid shell escaping issues)
+        ${PYTHON_CMD} << 'ENDPYTHON'
+import sys
+import os
+from models.player_dino import DINODataset, train_dino
+
+train_dir = os.environ.get("TRAIN_DIR", "data/input/train/player")
+annotations_file = os.path.join(train_dir, "_annotations.coco.json")
+output_dir = os.environ.get("OUTPUT_DIR", "data/output")
+epochs = int(os.environ.get("EPOCHS", "50"))
+batch_size = int(os.environ.get("BATCH_SIZE", "16"))
+lr = float(os.environ.get("LR", "5e-4"))
+checkpoint_name = os.environ.get("CHECKPOINT_NAME", "dino_player.pt")
+use_lora = os.environ.get("USE_LORA", "0") == "1"
+lora_r = int(os.environ.get("LORA_R", "4"))
+lora_alpha = int(os.environ.get("LORA_ALPHA", "8"))
+freeze_backbone_epochs = int(os.environ.get("FREEZE_BACKBONE_EPOCHS", "0"))
+pretrained_backbone = os.environ.get("PRETRAINED_BACKBONE", "")
+log_every = int(os.environ.get("LOG_EVERY", "10"))
+num_workers = int(os.environ.get("NUM_WORKERS", "4"))
+
+print(f"[TRAIN] Loading dataset from: {train_dir}")
+dataset = DINODataset(
+    data_dir=train_dir,
+    annotations_file=annotations_file
+)
+print(f"[TRAIN] Loaded {len(dataset)} images")
+
+print("[TRAIN] Starting DINOv3 training...")
+model, history = train_dino(
+    student=None,
+    dataset=dataset,
+    device="cuda",
+    epochs=epochs,
+    batch_size=batch_size,
+    learning_rate=lr,
+    output_dir=output_dir,
+    checkpoint_name=checkpoint_name,
+    pretrained_backbone_path=pretrained_backbone if pretrained_backbone else None,
+    freeze_backbone_epochs=freeze_backbone_epochs,
+    use_lora=use_lora,
+    lora_r=lora_r,
+    lora_alpha=lora_alpha,
+    num_workers=num_workers,
+    log_every=log_every,
+)
+
+print("[TRAIN] Training complete!")
+print(f"[TRAIN] Checkpoint saved to: {os.path.join(output_dir, checkpoint_name)}")
+ENDPYTHON
+        ;;
+
     run-main)
         echo "[SLURM] Running main pipeline"
         ${PYTHON_CMD} main.py \
@@ -176,7 +279,7 @@ case "${MODE}" in
 
     *)
         echo "[SLURM] ERROR: Unknown MODE '${MODE}'"
-        echo "  Valid modes: train-tracknet | train-yolo | train-stroke | run-main"
+        echo "  Valid modes: train-tracknet | train-yolo | train-stroke | train-dino | run-main"
         exit 1
         ;;
 esac

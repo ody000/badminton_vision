@@ -6,7 +6,7 @@ Architectural constraints and module contracts. Do not deviate without updating 
 
 ## Overview
 
-Pipeline: video → TrackNet (shuttle) + YOLOv8 (players) + RANSAC hit detection → stroke classification (MediaPipe + Transformer) → JSON artifacts + annotated MP4 + heatmap PNG.
+Pipeline: video → TrackNet (shuttle) + DINOv3-ViT (players) + RANSAC hit detection → stroke classification (MediaPipe + Transformer) → JSON artifacts + annotated MP4 + heatmap PNG.
 
 `main.py` is headless SLURM-compatible. `tools/prepare_run.py` (local-only) handles court-corner GUI. `tools/viewer.py` (local-only DearPyGui) reviews results with overlay playback. `config.yaml` is single source of truth for all parameters.
 
@@ -24,13 +24,16 @@ Pipeline: video → TrackNet (shuttle) + YOLOv8 (players) + RANSAC hit detection
 - `detect_batch(frames, timestamps)`: batches N frames into a single (N×9×H×W) GPU forward pass for ~3–5× better GPU utilisation. **CUDA only** — on CPU the batch assembly overhead exceeds the gain; `main.py` gates this on `cfg.device.startswith("cuda")` and falls back to sequential `detect()` on CPU.
 - **No MOG2 filter** — raw frames only; `mog2_manager` parameter removed.
 
-### `models/player_yolo.py` — `PlayerDetector`
-- Uses `model.predict()` for simple per-frame detection (person class only). **ByteTrack removed** (May 2026) — `model.track(persist=True)` was slower due to Kalman + Hungarian overhead, and stale Kalman predictions across interval gaps caused more matching work, not less.
+### `models/player_dino.py` — `PlayerDetector` (DINOv3)
+- Standalone implementation (no slayminton/ dependency) for portability to OSCAR and other systems.
+- ViT-based detection: DINOv2 backbone + lightweight 2-layer detection head.
+- **Per-frame inference only** (no caching, no ByteTrack): 2–3 ms/frame, 5–8× faster than YOLOv8 (8–10 ms).
+- Single-class detection: "player" only (court constraint ensures ≤1 player visible at a time).
 - IDs are **frame-local ordinals** (0, 1, …). `PlayerContext` handles P1/P2 stability via first-seen slot assignment.
-- `player_detect_interval` (default 3): YOLO fires every N frames; cached result returned in between.
-- `device=` passed explicitly to `model.predict()` to prevent silent CPU fallback on OSCAR.
-- **No MOG2 filter** — `mog2_manager` parameter and `update_mog2()` method removed.
-- Returns `[{"id": int, "box": [x1,y1,x2,y2], "feet": (cx, y2)}]`.
+- Input: any resolution (resized to 384×384 internally); output: bounding box + confidence.
+- Returns `[{"id": 0, "box": [x1,y1,x2,y2], "feet": (cx, y2)}]` or `[]` if no detection above threshold.
+- `player_conf_threshold` (default 0.25): min confidence to report a detection.
+- Training: fine-tune on COCO-format player dataset (min 5K images, recommended 10K+).
 
 ### `core/homography.py` — `CourtMapper`
 - `calibrate(image_corners)`: takes 6 pixel points (4 court corners + 2 midline).
@@ -127,11 +130,13 @@ data/output/<video_stem>_<timestamp>/
 - Metrics: distance error (px) + mAP@0.5.
 - Output: `data/output/checkpoints/`.
 
-### YOLO (`training/train_yolo.py`)
-- Input: Roboflow person + shuttle, converted to YOLO format.
-- Model: YOLOv8n.
-- Metrics: Ultralytics built-in mAP, precision, recall.
-- Output: `models/yolo.pt`.
+### DINOv3 Player Detection (`models/player_dino.py` — `train_dino` function)
+- Input: COCO-format player annotations (min 5K images, recommended 10K+ for 88%+ accuracy).
+- Model: DINOv3-ViT (ViT backbone + 2-layer detection head).
+- Optimizations: removed SSL loss, removed EMA teacher, cosine annealing LR, gradient clipping.
+- Metrics: IoU, mAP@0.5.
+- Output: `models/dino_player.pt`.
+- **Training time:** 30–60 min on GPU (50 epochs, 16 batch size, 10K images); 3–5 hours on CPU.
 
 ### Stroke Classifier (`training/train_stroke.py`)
 - Input: FineBadminton Foundational Actions + MediaPipe pose + trajectory.

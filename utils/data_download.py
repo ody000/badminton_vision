@@ -38,10 +38,12 @@ Roboflow (player + shuttle detection):
     If a project has no Download button it is private or has no published version.
 
     Category normalisation:
-    Common shuttle label variants ("shuttle", "bird", "cock", "feather") are
-    remapped to "shuttlecock".  Player variants ("person", "athlete",
-    "badminton_player", "badminton-player") are remapped to "player".
-    Everything else keeps its original name.
+    All label matching is case-insensitive (e.g. "Players", "PLAYER", "players"
+    all map to "player"). Shuttle variants ("shuttle", "bird", "cock", "feather",
+    etc.) are normalized to "shuttlecock". Player variants including plurals
+    ("person", "people", "player", "players", "athlete", "athletes",
+    "badminton_player", "badminton-player", "badminton player", "human", etc.)
+    are normalized to "player". Everything else keeps its lowercased original name.
 
 FineBadminton20k (stroke classification, ~43 GB):
     Source: https://huggingface.co/datasets/iLearn-Lab/Finebadminton-20K
@@ -78,13 +80,21 @@ CATEGORY_REMAP: dict[str, str] = {
     "feathercock":       "shuttlecock",
     "badminton_shuttle": "shuttlecock",
     "badminton-shuttle": "shuttlecock",
-    # player aliases
+    # player aliases (all case-insensitive due to .lower() in _normalise_category_name)
     "person":                "player",
+    "people":                "player",
     "player":                "player",
+    "players":               "player",  # plural
     "athlete":               "player",
+    "athletes":              "player",  # plural
     "badminton_player":      "player",
+    "badminton_players":     "player",  # plural
     "badminton-player":      "player",
+    "badminton-players":     "player",  # plural
     "badminton player":      "player",
+    "badminton players":     "player",  # plural with space
+    "human":                 "player",  # alternate
+    "person_badminton":      "player",  # variant
 }
 
 # ── FineBadminton constants ───────────────────────────────────────────────────
@@ -386,7 +396,28 @@ def _find_coco_json(directory: str) -> str | None:
 
 
 def _normalise_category_name(name: str) -> str:
-    return CATEGORY_REMAP.get(name.lower().strip(), name.lower().strip())
+    """Normalize category name to canonical form.
+
+    Strategy:
+    1. Check exact match in CATEGORY_REMAP (fast path for common variations)
+    2. Check if label contains 'player' or 'person' substring → normalize to 'player'
+    3. Check if label contains 'shuttle', 'bird', 'cock', 'feather' → normalize to 'shuttlecock'
+    4. Otherwise return lowercased original name
+    """
+    normalized = name.lower().strip()
+
+    # Fast path: exact match in remap dict
+    if normalized in CATEGORY_REMAP:
+        return CATEGORY_REMAP[normalized]
+
+    # Substring matching for flexible label normalization
+    if any(substr in normalized for substr in ["player", "person"]):
+        return "player"
+    if any(substr in normalized for substr in ["shuttle", "bird", "cock", "feather"]):
+        return "shuttlecock"
+
+    # Default: return lowercased name unchanged
+    return normalized
 
 
 def merge_coco_datasets(source_dirs: List[str], output_dir: str) -> None:
