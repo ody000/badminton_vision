@@ -72,6 +72,32 @@ Three interrelated changes landed together. See `AGENTS.md` for updated module c
 
 ---
 
+## ✅ Pipeline Performance Regression — 40 min → 50 min (May 18, 2026)
+
+**Problem:** A 2-minute clip that previously took ~40 minutes regressed to ~50 minutes after introducing `detect_batch()` and YOLO interval gating.
+
+**Root causes (in order of impact):**
+
+1. **`detect_batch()` activated on CPU.** On CPU there is no hardware parallelism; the batch assembly overhead (8× cvtColor + 24× resize + `torch.cat`) exceeds any per-frame savings. The batch path is strictly slower on CPU than sequential `detect()`.
+
+2. **`model.track(persist=True)` ByteTrack overhead.** Every YOLO call ran Kalman predict → Hungarian match → track birth/death. With interval gating (every 3 frames), Kalman state went stale between calls, increasing matching cost. Players on a fixed court don't need re-ID; this was pure overhead.
+
+3. **YOLO silent CPU fallback.** `device=` was not passed to `model.track()`, causing Ultralytics to silently run inference on CPU even on CUDA nodes. Most likely cause of the original 40-minute anomaly.
+
+**Solutions:**
+
+| Fix | File | Change |
+|---|---|---|
+| Gate `detect_batch` on CUDA | `main.py` | `_use_batched = cfg.device.startswith("cuda")`; CPU uses sequential `detect()` |
+| Remove ByteTrack | `models/player_yolo.py` | `model.track(persist=True)` → `model.predict()`; IDs are frame-local ordinals |
+| Explicit device forwarding | `models/player_yolo.py` | `device=self.device` in `model.predict()` kwargs |
+| Disable stroke classifier in SLURM | `config.yaml` | `stroke_classify_enabled: false` skips MediaPipe init |
+| Gate homography on shuttle presence | `main.py` | `player_feet_real_list()` only called when shuttle detected |
+
+**`detect_batch()` status:** method retained in `TrackNetTracker` and activated automatically on CUDA (`tracknet_batch_size: 8` in config). Expected ~3–5× TrackNet throughput improvement on OSCAR GPU nodes.
+
+---
+
 ## ✅ Stroke One-Hot Collapse (May 17, 2026)
 
 **Problem:** Model predicted single class (drive=1.0) every epoch; macro_F1=0.084.

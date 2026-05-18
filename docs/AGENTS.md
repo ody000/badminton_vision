@@ -17,14 +17,18 @@ Pipeline: video → TrackNet (shuttle) + YOLOv8 (players) + RANSAC hit detection
 ## Key Modules
 
 ### `models/shuttle_tracknet.py` — `TrackNetTracker`
-- Accepts 3 consecutive RGB frames (or 1 frame replicated ×3).
-- Maintains timestamp-aware buffer; flushes if gap > 2/(fps).
+- Accepts a single BGR frame + timestamp; maintains a 3-frame buffer internally.
+- Timestamp-aware buffer flush if gap > 2/(fps).
 - Resizes to (288, 512) before inference.
 - Returns `{"shuttle": (timestamp, x, y, w, h)}` if confidence > threshold, else `{}`.
+- `detect_batch(frames, timestamps)`: batches N frames into a single (N×9×H×W) GPU forward pass for ~3–5× better GPU utilisation. **CUDA only** — on CPU the batch assembly overhead exceeds the gain; `main.py` gates this on `cfg.device.startswith("cuda")` and falls back to sequential `detect()` on CPU.
 - **No MOG2 filter** — raw frames only; `mog2_manager` parameter removed.
 
 ### `models/player_yolo.py` — `PlayerDetector`
-- Uses `model.track(frame, persist=True)` for stable ByteTrack IDs (person class only).
+- Uses `model.predict()` for simple per-frame detection (person class only). **ByteTrack removed** (May 2026) — `model.track(persist=True)` was slower due to Kalman + Hungarian overhead, and stale Kalman predictions across interval gaps caused more matching work, not less.
+- IDs are **frame-local ordinals** (0, 1, …). `PlayerContext` handles P1/P2 stability via first-seen slot assignment.
+- `player_detect_interval` (default 3): YOLO fires every N frames; cached result returned in between.
+- `device=` passed explicitly to `model.predict()` to prevent silent CPU fallback on OSCAR.
 - **No MOG2 filter** — `mog2_manager` parameter and `update_mog2()` method removed.
 - Returns `[{"id": int, "box": [x1,y1,x2,y2], "feet": (cx, y2)}]`.
 
@@ -57,6 +61,7 @@ Direct port of slayminton. Rally duration statistics only.
 ### `models/stroke_classifier.py` — `StrokeClassifier`
 - MediaPipe Pose (33 joints) + trajectory (pre/post) → `stroke_transformer.py`.
 - Output: `{"stroke_type": str, "confidence": float, ...}`.
+- `stroke_classify_enabled` (default `false` in `config.yaml`): skips MediaPipe init and model load entirely. Set to `true` for local post-processing runs where stroke labels are needed. SLURM inference jobs leave this off.
 
 ### `utils/mog.py` — `MOG2Manager`
 - Stateful wrapper for cv2.BackgroundSubtractorMOG2.
@@ -143,7 +148,7 @@ data/output/<video_stem>_<timestamp>/
 | TrackNet extracts wrong heatmap channel | Adopt slayminton `TrackNetTracker` (detects channel from checkpoint) |
 | Court GUI never saves JSON | `tools/prepare_run.py` always saves; `main.py` only reads |
 | MOG2 filter suppressed ≥ 97% of valid detections | Removed MOG2 from inference pipeline entirely (May 2026) |
-| Player ID swaps after occlusion | `PlayerContext._nearest_player()` remaps ByteTrack IDs to stable P1/P2 |
+| Player ID swaps after occlusion | `PlayerContext._nearest_player()` remaps ordinal IDs to stable P1/P2 |
 | SLURM logs to submit directory | `#SBATCH -o data/output/logs/slurm-%j.out` |
 | Homography + kinematics + viz in one 900-line file | Split into `core/`, `utils/visualization.py` |
 | Constants scattered across 8+ files | `config.yaml` as single source |
@@ -151,6 +156,11 @@ data/output/<video_stem>_<timestamp>/
 | Zero rally count when min_hits gate set to 1 | `rally_min_hits: 0` — hit detection is separate from rally gating |
 | Viewer segfault on button click (macOS) | All video I/O deferred to after `render_dearpygui_frame()` via `_needs_render` flag |
 | Playback speed 0.75× instead of 1.0× | `_last_tick += frames_elapsed * interval` (not `= now`) |
+| YOLO silently falling back to CPU on OSCAR | Pass `device=` explicitly to `model.predict()` (May 2026) |
+| ByteTrack Kalman overhead slowing player detection | Replaced `model.track(persist=True)` with `model.predict()`; IDs are frame-local ordinals (May 2026) |
+| `detect_batch()` slower than sequential on CPU | Gate batched TrackNet path on `cfg.device.startswith("cuda")`; CPU falls back to `detect()` (May 2026) |
+| MediaPipe loading at startup even in headless SLURM runs | `stroke_classify_enabled: false` in `config.yaml` skips init entirely (May 2026) |
+| `player_feet_real_list()` called on every frame | Gate on shuttle presence — skip homography transform when shuttle not detected (May 2026) |
 
 ---
 
