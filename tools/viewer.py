@@ -165,6 +165,11 @@ class Viewer:
         # positioned there, so we skip the expensive cap.set() seek.
         # -2 = cap position unknown (force a seek on next read).
         self._last_decoded_idx: int = -2
+        # Shuttle trail: keep ring visible for SHUTTLE_TRAIL_FRAMES after
+        # the last real detection so dropout gaps don't blank the display.
+        self._last_shuttle_j:        Optional[dict] = None
+        self._last_shuttle_frame_idx: int           = -9999
+        self.SHUTTLE_TRAIL_FRAMES:   int            = 30   # 1 s at 30 fps
         # Pending render request set by callbacks; consumed by the main loop
         # AFTER render_dearpygui_frame() returns.  This decouples video I/O
         # from DearPyGui callback context, preventing macOS segfaults.
@@ -205,6 +210,17 @@ class Viewer:
         self._p1_id: Optional[int] = all_ids[0] if all_ids else None
         self._p2_id: Optional[int] = all_ids[1] if len(all_ids) >= 2 else None
 
+        # ── Precomputed heatmap ───────────────────────────────────────
+        # Static base image (INSERT_H × INSERT_W BGR) loaded/computed once.
+        # Per-frame: copy + draw player dots → upload to DPG texture.
+        self._heatmap_base:    Optional[np.ndarray] = None
+        self._heatmap_H:       Optional[np.ndarray] = None   # homography
+        self._heatmap_tex_tag: str  = "heatmap_tex"
+        self._heatmap_w:       int  = 0
+        self._heatmap_h:       int  = 0
+        self._heatmap_loaded:  bool = False
+        self._load_or_compute_heatmap()
+
     # ------------------------------------------------------------------
     # JSON helpers
     # ------------------------------------------------------------------
@@ -218,6 +234,100 @@ class Viewer:
             except Exception as e:
                 print(f"[VIEWER] {name}: {e}")
         return default
+
+    # ------------------------------------------------------------------
+    # Precomputed heatmap helpers
+    # ------------------------------------------------------------------
+
+    def _load_or_compute_heatmap(self) -> None:
+        """Load heatmap.png from run dir; compute it if missing."""
+        try:
+            from utils.precompute_heatmap import (
+                precompute_heatmap, compute_homography, INSERT_W, INSERT_H,
+            )
+        except Exception as e:
+            print(f"[VIEWER] heatmap module unavailable: {e}")
+            return
+
+        # Court points for homography
+        cp_data = self._load_json("court_points.json", {})
+        court_points = next(iter(cp_data.values()), []) if cp_data else []
+        if court_points:
+            self._heatmap_H = compute_homography(court_points, self.vid_h, self.vid_w)
+
+        hm_path = self.run_dir / "heatmap.png"
+        if hm_path.exists():
+            img = cv2.imread(str(hm_path))
+            if img is not None:
+                self._heatmap_base = img
+                self._heatmap_w    = img.shape[1]
+                self._heatmap_h    = img.shape[0]
+                self._heatmap_loaded = True
+                print(f"[VIEWER] heatmap loaded ({self._heatmap_w}×{self._heatmap_h})")
+                return
+
+        # heatmap.png absent — compute it now (takes a few seconds)
+        if self.tracking and court_points:
+            print("[VIEWER] heatmap.png not found — computing from tracking data…")
+            try:
+                img = precompute_heatmap(
+                    tracking_results=self.tracking,
+                    court_points=court_points,
+                    frame_w=self.vid_w,
+                    frame_h=self.vid_h,
+                    output_path=str(hm_path),
+                )
+                self._heatmap_base = img
+                self._heatmap_w    = img.shape[1]
+                self._heatmap_h    = img.shape[0]
+                self._heatmap_loaded = True
+            except Exception as e:
+                print(f"[VIEWER] heatmap compute failed: {e}")
+        else:
+            print("[VIEWER] heatmap skipped: no tracking data or court points")
+
+    def _init_heatmap_texture(self) -> None:
+        """Register the heatmap DPG dynamic texture (must be inside texture_registry)."""
+        if not self._heatmap_loaded or self._heatmap_w == 0:
+            return
+        blank = [0.0] * (self._heatmap_w * self._heatmap_h * 4)
+        if dpg.does_item_exist(self._heatmap_tex_tag):
+            dpg.delete_item(self._heatmap_tex_tag)
+        dpg.add_dynamic_texture(
+            self._heatmap_w, self._heatmap_h, blank, tag=self._heatmap_tex_tag
+        )
+
+    def _update_heatmap_texture(self, idx: int) -> None:
+        """Copy the static base heatmap, draw live player dots, upload to DPG."""
+        if (not self._heatmap_loaded
+                or self._heatmap_base is None
+                or not dpg.does_item_exist(self._heatmap_tex_tag)):
+            return
+
+        try:
+            from utils.precompute_heatmap import video_to_insert
+        except Exception:
+            return
+
+        canvas = self._heatmap_base.copy()
+
+        t = self._tracking_by_frame.get(idx, {})
+        for p in t.get("players", []):
+            pid  = p.get("id")
+            feet = p.get("feet_px") or p.get("feet")
+            if feet is None or self._heatmap_H is None:
+                continue
+            ix, iy = video_to_insert(float(feet[0]), float(feet[1]), self._heatmap_H)
+            color = OCV_P1 if pid == self._p1_id else OCV_P2
+            label = "P1"   if pid == self._p1_id else "P2"
+            cv2.circle(canvas, (ix, iy), 7, (0, 0, 0), 2, cv2.LINE_AA)
+            cv2.circle(canvas, (ix, iy), 5, color, -1, cv2.LINE_AA)
+            cv2.putText(canvas, label, (ix + 6, iy + 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.28, color, 1, cv2.LINE_AA)
+
+        rgba = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGBA)
+        flat = np.ascontiguousarray(rgba, dtype=np.float32) / 255.0
+        dpg.set_value(self._heatmap_tex_tag, flat)
 
     # ------------------------------------------------------------------
     # Cumulative heatmap history (built once, lazily)
@@ -329,18 +439,35 @@ class Viewer:
                     cv2.circle(canvas, (fx, fy), 4, color, -1, cv2.LINE_AA)
 
         # ── Shuttle ring ──────────────────────────────────────────────
-        if self.show_shuttle and shuttle_j is not None:
-            cx  = int(shuttle_j["x"] + shuttle_j["w"] / 2)
-            cy  = int(shuttle_j["y"] + shuttle_j["h"] / 2)
-            # Ring radius: slightly larger than the 16-px detection box.
-            ring_r = max(14, int(max(shuttle_j.get("w", 16),
-                                    shuttle_j.get("h", 16)) * 0.85))
-            # Black shadow for contrast on any background
-            cv2.circle(canvas, (cx, cy), ring_r + 2, (0, 0, 0),   3, cv2.LINE_AA)
-            # Bold red-orange ring (BGR: 0, 60, 255)
-            cv2.circle(canvas, (cx, cy), ring_r,     (0, 60, 255), 2, cv2.LINE_AA)
-            # Small cross-hair dot at centre
-            cv2.circle(canvas, (cx, cy), 3,          (0, 60, 255), -1, cv2.LINE_AA)
+        # Update trail state.
+        if shuttle_j is not None:
+            self._last_shuttle_j         = shuttle_j
+            self._last_shuttle_frame_idx = idx
+
+        # Choose which position to draw: live detection or ghost trail.
+        _trail_age = idx - self._last_shuttle_frame_idx
+        _is_live   = (shuttle_j is not None)
+        _is_ghost  = (not _is_live
+                      and self._last_shuttle_j is not None
+                      and _trail_age <= self.SHUTTLE_TRAIL_FRAMES)
+        _draw_src  = shuttle_j if _is_live else (self._last_shuttle_j if _is_ghost else None)
+
+        if self.show_shuttle and _draw_src is not None:
+            cx  = int(_draw_src["x"] + _draw_src.get("w", 16) / 2)
+            cy  = int(_draw_src["y"] + _draw_src.get("h", 16) / 2)
+            ring_r = max(14, int(max(_draw_src.get("w", 16),
+                                     _draw_src.get("h", 16)) * 0.85))
+            if _is_live:
+                # Full-brightness red-orange ring
+                cv2.circle(canvas, (cx, cy), ring_r + 2, (0, 0, 0),    3, cv2.LINE_AA)
+                cv2.circle(canvas, (cx, cy), ring_r,     (0, 60, 255),  2, cv2.LINE_AA)
+                cv2.circle(canvas, (cx, cy), 3,          (0, 60, 255), -1, cv2.LINE_AA)
+            else:
+                # Ghost: dimmed dashed-style ring (two arcs give a visual cue it's a trail)
+                fade = max(0.25, 1.0 - _trail_age / self.SHUTTLE_TRAIL_FRAMES)
+                ghost_col = (int(0 * fade), int(60 * fade), int(200 * fade))
+                cv2.circle(canvas, (cx, cy), ring_r + 2, (0, 0, 0),  2, cv2.LINE_AA)
+                cv2.circle(canvas, (cx, cy), ring_r,     ghost_col,   1, cv2.LINE_AA)
 
         # ── Hit flash ─────────────────────────────────────────────────
         if self.show_hits and hit_events:
@@ -427,6 +554,7 @@ class Viewer:
             if dpg.does_item_exist("vid_image"):
                 dpg.configure_item("vid_image", width=rw, height=rh)
         dpg.set_value(self._tex_tag, self._frame_to_rgba_flat(rendered))
+        self._update_heatmap_texture(idx)
         self._update_info_panel(idx)
         self._update_timeline_playhead(idx)
 
@@ -634,6 +762,10 @@ class Viewer:
         rh, rw = first.shape[:2]
         self._init_texture(rw, rh)
 
+        # Register heatmap texture (inside the same texture registry)
+        with dpg.texture_registry():
+            self._init_heatmap_texture()
+
         with dpg.handler_registry():
             dpg.add_key_press_handler(callback=self._cb_key)
 
@@ -809,6 +941,17 @@ class Viewer:
                         dpg.add_text(f"P2  ID {self._p2_id}", color=list(C_P2_RGBA))
                     if self._p1_id is None and self._p2_id is None:
                         dpg.add_text("No players detected", color=list(C_TEXT_DIM))
+
+                    self._section_label("FOOTWORK HEATMAP")
+                    if self._heatmap_loaded and dpg.does_item_exist(self._heatmap_tex_tag):
+                        dpg.add_image(
+                            self._heatmap_tex_tag,
+                            width=self._heatmap_w,
+                            height=self._heatmap_h,
+                        )
+                    else:
+                        dpg.add_text("No heatmap — run main.py first",
+                                     color=list(C_TEXT_DIM), wrap=PANEL_R_W - 18)
 
         dpg.set_primary_window("root", True)
 

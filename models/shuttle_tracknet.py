@@ -2,7 +2,6 @@
 
 Key additions vs slayminton:
 - Timestamp-aware buffer: flush if gap > 2 * (1/fps) between frames
-- White-pixel / MOG2 foreground filter for shuttle detections
 - set_fps() method
 - Accepts cfg (SimpleNamespace) for config-driven init
 """
@@ -38,7 +37,6 @@ class TrackNetTracker:
         expected_h: int = 288,
         expected_w: int = 512,
         fps: float = 30.0,
-        mog2_manager=None,
     ):
         # Read params from cfg if provided, use explicit args as overrides.
         if cfg is not None:
@@ -57,11 +55,6 @@ class TrackNetTracker:
         self.conf_threshold = float(conf_threshold)
         self.expected_size = (int(expected_h), int(expected_w))  # (H, W)
         self.fps = float(fps)
-        self.mog2_manager = mog2_manager
-        self.mog2_foreground_thresh = (
-            float(getattr(cfg, "mog2_foreground_thresh_shuttle", 0.05)) if cfg else 0.05
-        )
-        self.warmup_frames = int(getattr(cfg, "mog2_warmup_frames", 150)) if cfg else 150
         self._frame_count = 0
 
         # Timestamp-aware buffer: list of (timestamp, frame_rgb)
@@ -189,16 +182,6 @@ class TrackNetTracker:
 
         if conf < self.conf_threshold:
             return {}
-
-        # MOG2 white-pixel filter (only after warmup)
-        if (
-            self.mog2_manager is not None
-            and self._frame_count > self.warmup_frames
-        ):
-            box = [x0, y0, x0 + bw, y0 + bh]
-            fg_ratio = self.mog2_manager.get_foreground_ratio(frame, box)
-            if fg_ratio < self.mog2_foreground_thresh:
-                return {}
 
         return {
             "shuttle": (

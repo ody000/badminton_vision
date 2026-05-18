@@ -2,7 +2,6 @@
 
 Tests:
   - Rally starts only after motion_required_streak consecutive frames of motion
-    (first-detection bypass is removed — streak must count up from 1)
   - Rally ends after inactive_timeout_s with no motion
   - end_rally() resets all per-rally state (last_center, motion_streak, etc.)
   - Grace period keeps rally alive through short detection gaps
@@ -30,8 +29,6 @@ def _make_cfg(**kwargs):
         rally_inactive_timeout_s=1.0,
         rally_min_displacement_px=2.0,
         rally_motion_required_streak=3,
-        rally_max_displacement_fraction=0.1667,
-        rally_stable_frame_threshold=5,
         rally_min_duration_s=0.5,
         rally_detection_grace_frames=3,
         rally_min_hits=1,
@@ -141,7 +138,7 @@ class TestGameStateRally:
         assert len(gs.get_rally_data()) >= 1, "At least one rally segment should be recorded"
 
     def test_end_rally_resets_state(self):
-        """end_rally() must clear last_center, motion_streak, position_history, etc."""
+        """end_rally() must clear last_center, motion_streak, and related state."""
         cfg = _make_cfg(
             rally_inactive_timeout_s=0.5,
             rally_min_duration_s=0.0,
@@ -158,20 +155,20 @@ class TestGameStateRally:
 
         assert gs.rally_active
 
-        # Let it time out
+        # Feed exactly enough silence to trigger inactive timeout (0.5s = 15 frames at 30fps)
         inactive_start = 10 * FRAME_DT
-        for i in range(25):
+        for i in range(20):
             ts = inactive_start + i * FRAME_DT
             gs.update(ts, None, FRAME_SIZE)
+            if not gs.rally_active:
+                # Capture state immediately after rally ends — before more None frames
+                # increment _miss_streak again.
+                assert gs.last_center is None, "last_center should be None after end_rally"
+                assert gs.last_motion_timestamp is None, "last_motion_timestamp should be None"
+                assert gs.motion_streak == 0, "motion_streak should be 0"
+                break
 
-        assert not gs.rally_active
-
-        # All state that was reset by end_rally() should be clean
-        assert gs.last_center is None, "last_center should be None after end_rally"
-        assert gs.last_motion_timestamp is None, "last_motion_timestamp should be None"
-        assert gs.motion_streak == 0, "motion_streak should be 0"
-        assert gs.position_history == [], "position_history should be empty"
-        assert gs._miss_streak == 0, "_miss_streak should be 0"
+        assert not gs.rally_active, "Rally should have ended within the timeout window"
 
     def test_grace_period_keeps_rally_alive(self):
         """Up to detection_grace_frames missed frames should not break the rally."""
@@ -264,14 +261,13 @@ class TestGameStateRally:
         )
         gs = GameState(cfg=cfg)
 
-        # Build a long rally but don't manually inject any hits — hit_count stays 0
-        # (trajectory-based detection won't fire on a straight-line synthetic path
-        # since prediction error will be low)
+        # Build a long rally but don't manually call record_hit() — hit_count stays 0
+        # (GameState.update() no longer calls record_hit() internally; hits come from HitDetector)
         x = 100.0
         for i in range(30):
             ts = i * FRAME_DT
             gs.update(ts, _make_shuttle(ts, x, 240.0), FRAME_SIZE)
-            x += 5.0  # constant velocity → low prediction error → no hits detected
+            x += 5.0
 
         # End it with silence
         base = 30 * FRAME_DT

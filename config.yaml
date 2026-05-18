@@ -30,9 +30,9 @@ hit_ransac_min_inliers: 3
 # ─── Rally ───────────────────────────────────────────────────────────────────
 rally_inactive_timeout_s: 1.0
 rally_min_period_s: 0.5           # short inactive gaps below this merged into rally
-rally_motion_required_streak: 1    # was 2 — start rally on first motion frame
+rally_motion_required_streak: 2
 rally_max_displacement_fraction: 0.1667  # 1/6 of max(frame_h, frame_w)
-rally_min_displacement_px: 0.5    # was 1.5 — nearly any movement triggers motion
+rally_min_displacement_px: 5.0
 rally_stable_frame_threshold: 5
 rally_min_duration_s: 0.1         # was 0.3 — accept very short rallies
 rally_detection_grace_frames: 8   # was 5 — bridge more TrackNet miss frames

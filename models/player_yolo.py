@@ -1,7 +1,6 @@
-"""PlayerDetector: YOLOv8 + ByteTrack with MOG2 foreground confidence filter.
+"""PlayerDetector: YOLOv8 + ByteTrack.
 
 Uses model.track() with persist=True for stable ByteTrack IDs.
-MOG2 filter is applied after mog2_warmup_frames to remove false positives.
 """
 
 from __future__ import annotations
@@ -16,26 +15,20 @@ class PlayerDetector:
 
     Args:
         cfg: SimpleNamespace from load_config().
-        mog2_manager: MOG2Manager instance (shared with shuttle tracker).
     """
 
-    def __init__(self, cfg=None, mog2_manager=None):
+    def __init__(self, cfg=None):
         from ultralytics import YOLO
 
-        self.mog2 = mog2_manager
         self.frame_count = 0
 
         if cfg is not None:
             weights = getattr(cfg, "player_weights", "models/yolo.pt")
             self.conf_threshold = float(getattr(cfg, "player_conf_threshold", 0.5))
-            self.warmup_frames = int(getattr(cfg, "mog2_warmup_frames", 150))
-            self.mog2_fg_thresh = float(getattr(cfg, "mog2_foreground_thresh_player", 0.06))
             self.device = getattr(cfg, "device", "cpu")
         else:
             weights = "models/yolo.pt"
             self.conf_threshold = 0.5
-            self.warmup_frames = 150
-            self.mog2_fg_thresh = 0.06
             self.device = "cpu"
 
         # Fall back to yolov8n.pt if fine-tuned weights do not exist
@@ -83,15 +76,6 @@ class PlayerDetector:
             box = [x1, y1, x2, y2]
             track_id = int(track_ids[i]) if i < len(track_ids) else i
 
-            # MOG2 filter: applied only after warmup
-            if (
-                self.mog2 is not None
-                and self.frame_count > self.warmup_frames
-            ):
-                fg_ratio = self.mog2.get_foreground_ratio(frame, box)
-                if fg_ratio < self.mog2_fg_thresh:
-                    continue
-
             cx = (x1 + x2) // 2
             feet = (cx, y2)
 
@@ -103,11 +87,3 @@ class PlayerDetector:
             })
 
         return detections
-
-    def update_mog2(self, frame: np.ndarray) -> None:
-        """Apply MOG2 to frame to update the background model.
-
-        Call this before detect() each frame.
-        """
-        if self.mog2 is not None:
-            self.mog2.apply(frame)

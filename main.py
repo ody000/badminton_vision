@@ -58,7 +58,6 @@ def run(
                            Off by default to avoid slow re-encode on OSCAR.
     """
     from utils.config_loader import load_config
-    from utils.mog import MOG2Manager
     from utils.video_io import VideoIOHandler
     from utils.visualization import render_court_insert, render_frame
     from models.shuttle_tracknet import TrackNetTracker
@@ -89,13 +88,8 @@ def run(
     print(f"[MAIN] run_dir={run_dir}")
 
     # ── Initialize components ─────────────────────────────────────────────────
-    mog2 = MOG2Manager(
-        var_threshold=float(getattr(cfg, "mog2_var_threshold", 200)),
-        history=int(getattr(cfg, "mog2_history", 1000)),
-    )
-
-    tracknet = TrackNetTracker(cfg=cfg, mog2_manager=mog2)
-    yolo = PlayerDetector(cfg=cfg, mog2_manager=mog2)
+    tracknet = TrackNetTracker(cfg=cfg)
+    yolo = PlayerDetector(cfg=cfg)
 
     court_mapper = CourtMapper(cfg)
     court_points_file = getattr(cfg, "court_points_file", "data/input/court_points.json")
@@ -127,10 +121,7 @@ def run(
         final_timestamp = timestamp
         h, w = frame_bgr.shape[:2]
 
-        # 1. MOG2 update
-        yolo.update_mog2(frame_bgr)
-
-        # 2. Shuttle detection
+        # 1. Shuttle detection
         shuttle_det_dict = tracknet.detect(frame_bgr, timestamp)
         shuttle_tuple = shuttle_det_dict.get("shuttle")  # (ts, x, y, w, h) or None
         shuttle: Shuttle | None = Shuttle.from_tuple(shuttle_tuple) if shuttle_tuple else None
@@ -256,6 +247,45 @@ def run(
         shutil.copy2(court_points_file, os.path.join(run_dir, "court_points.json"))
     else:
         _write_json(os.path.join(run_dir, "court_points.json"), {})
+
+    # Precompute player-footwork heatmap (static PNG loaded by viewer)
+    try:
+        from utils.precompute_heatmap import precompute_heatmap as _precompute_heatmap
+        import json as _json
+        _cp_path = os.path.join(run_dir, "court_points.json")
+        with open(_cp_path, encoding="utf-8") as _f:
+            _cp_data = _json.load(_f)
+        _cp_points = next(iter(_cp_data.values())) if _cp_data else []
+
+        if _cp_points and len(tracking_results) > 0:
+            # Determine frame size from first frame with a known player position
+            _fh, _fw = 0, 0
+            for _fr in tracking_results:
+                if _fr.get("players"):
+                    _p = _fr["players"][0]
+                    _box = _p.get("box")
+                    if _box:
+                        # Rough estimate: x2,y2 give a lower bound on dimensions
+                        _fw = max(_fw, int(_box[2]))
+                        _fh = max(_fh, int(_box[3]))
+            if _fh == 0 or _fw == 0:
+                _fh, _fw = 1080, 1920   # safe fallback
+
+            _hm_path = os.path.join(run_dir, "heatmap.png")
+            _precompute_heatmap(
+                tracking_results=tracking_results,
+                court_points=_cp_points,
+                frame_w=_fw,
+                frame_h=_fh,
+                output_path=_hm_path,
+                gaussian_sigma=float(getattr(cfg, "heatmap_gaussian_sigma", 40.0)),
+                p1_color_bgr=tuple(getattr(cfg, "player_p1_color_bgr", [57, 255, 20])),
+                p2_color_bgr=tuple(getattr(cfg, "player_p2_color_bgr", [0, 165, 255])),
+            )
+        else:
+            print("[MAIN] Skipping heatmap: no court points or no tracking data.")
+    except Exception as _e:
+        print(f"[MAIN] Warning: heatmap precompute failed: {_e}")
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n[MAIN] ─── Run complete ───")
