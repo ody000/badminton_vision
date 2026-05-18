@@ -238,6 +238,7 @@ num_workers = int(os.environ.get("NUM_WORKERS", "4"))
 
 print(f"[TRAIN] Loading dataset from: {train_dir}")
 dataset = DINODataset(
+    device="cuda",
     data_dir=train_dir,
     annotations_file=annotations_file
 )

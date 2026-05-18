@@ -72,7 +72,7 @@ def main():
 
     print(f"\n[MERGE] Output: {output_dir}\n")
 
-    # Call merge function
+    # Call merge function from data_download.py
     merge_coco_datasets(source_dirs, output_dir)
 
     # Verify output
