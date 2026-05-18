@@ -145,7 +145,7 @@ def main():
 
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     from utils.config_loader import load_config
-    from slayminton.models.tracknet import TrackNet  # Use slayminton's implementation for weight compatibility
+    from models.TrackNet import TrackNet
     from training.evaluate import evaluate_tracknet_epoch
 
     cfg = load_config(args.config)

@@ -1,12 +1,10 @@
-"""TrackNetTracker - port from slayminton/models/tracknet.py with timestamp-aware buffer.
+"""TrackNetTracker - wrapper around TrackNet with timestamp-aware buffer.
 
-Key additions vs slayminton:
+Key features:
 - Timestamp-aware buffer: flush if gap > 2 * (1/fps) between frames
 - set_fps() method
 - Accepts cfg (SimpleNamespace) for config-driven init
-
-IMPORTANT: Uses slayminton's TrackNet implementation (with BatchNorm transpose hack)
-to maintain compatibility with their pretrained weights.
+- Batched inference support for GPU efficiency
 """
 
 from __future__ import annotations
@@ -16,7 +14,7 @@ import cv2
 import numpy as np
 import torch
 
-from slayminton.models.tracknet import TrackNet
+from models.TrackNet import TrackNet
 
 
 class TrackNetTracker:
