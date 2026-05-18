@@ -2,7 +2,10 @@
 
 Tests:
   - Blank frame → detect() returns list, no exception
-  - MOG2 filter disabled for first 150 frames (warmup)
+  - Interval gating: YOLO fires on frame 1, is skipped on frames 2..N, fires again on N+1
+  - Cached detections are returned verbatim on skipped frames
+  - detect_interval=1 disables gating (YOLO fires every frame)
+  - device is passed explicitly to model.track()
 """
 
 from __future__ import annotations
@@ -16,16 +19,15 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 
-def _make_cfg():
+def _make_cfg(detect_interval: int = 3):
     return SimpleNamespace(
         player_weights="models/yolo.pt",  # may not exist; falls back to yolov8n.pt
         player_conf_threshold=0.5,
-        mog2_warmup_frames=150,
-        mog2_foreground_thresh_player=0.06,
         device="cpu",
+        player_detect_interval=detect_interval,
     )
 
 
@@ -59,80 +61,115 @@ class TestPlayerDetector:
         from models.player_yolo import PlayerDetector
 
         cfg = _make_cfg()
-        # Use a minimal mock to avoid downloading YOLO weights in CI
         with patch("models.player_yolo.YOLO") as mock_yolo_cls:
             mock_model = MagicMock()
             mock_model.track.return_value = _make_mock_results(0)
             mock_yolo_cls.return_value = mock_model
 
-            detector = PlayerDetector(cfg=cfg, mog2_manager=None)
-            frame = _blank_frame()
-            result = detector.detect(frame)
+            detector = PlayerDetector(cfg=cfg)
+            result = detector.detect(_blank_frame())
 
         assert isinstance(result, list), f"detect() should return list, got {type(result)}"
 
-    def test_detect_no_mog2_filter_during_warmup(self):
-        """During warmup (frame_count <= warmup_frames), MOG2 filter should NOT reject boxes."""
+    def test_interval_gating_fires_on_first_frame(self):
+        """YOLO must fire on the very first call regardless of interval."""
         from models.player_yolo import PlayerDetector
-        from utils.mog import MOG2Manager
 
-        cfg = _make_cfg()
-
+        cfg = _make_cfg(detect_interval=3)
         with patch("models.player_yolo.YOLO") as mock_yolo_cls:
-            import torch
-            boxes_mock = MagicMock()
-            boxes_mock.xyxy = torch.tensor([[10.0, 10.0, 100.0, 200.0]])
-            boxes_mock.id = torch.tensor([1.0])
-
-            result_mock = MagicMock()
-            result_mock.boxes = boxes_mock
-
             mock_model = MagicMock()
-            mock_model.track.return_value = [result_mock]
+            mock_model.track.return_value = _make_mock_results(0)
             mock_yolo_cls.return_value = mock_model
 
-            mog2 = MOG2Manager()
-            detector = PlayerDetector(cfg=cfg, mog2_manager=mog2)
+            detector = PlayerDetector(cfg=cfg)
+            detector.detect(_blank_frame())  # frame 1
 
-            # Apply the MOG2 to a blank frame (low foreground ratio)
-            mog2.apply(_blank_frame())
+        assert mock_model.track.call_count == 1, (
+            "YOLO should fire on the first detect() call"
+        )
 
-            # During warmup, even low foreground ratio should not filter boxes
-            frame = _blank_frame()
-            detector.frame_count = 0  # force warmup state
-
-            result = detector.detect(frame)
-
-        assert isinstance(result, list)
-        # During warmup, boxes are returned regardless of MOG2 ratio
-        assert len(result) >= 0  # just no exception
-
-    def test_update_mog2_no_exception(self):
-        """update_mog2() should apply MOG2 without raising."""
+    def test_interval_gating_skips_intermediate_frames(self):
+        """With interval=3, YOLO fires on frames 1 and 4 but is skipped on 2 and 3."""
         from models.player_yolo import PlayerDetector
-        from utils.mog import MOG2Manager
 
-        cfg = _make_cfg()
-
+        cfg = _make_cfg(detect_interval=3)
         with patch("models.player_yolo.YOLO") as mock_yolo_cls:
-            mock_yolo_cls.return_value = MagicMock()
-            mog2 = MOG2Manager()
-            detector = PlayerDetector(cfg=cfg, mog2_manager=mog2)
-            frame = _blank_frame()
-            detector.update_mog2(frame)  # should not raise
+            mock_model = MagicMock()
+            mock_model.track.return_value = _make_mock_results(0)
+            mock_yolo_cls.return_value = mock_model
 
-    def test_detect_with_no_mog2_no_exception(self):
-        """Passing mog2_manager=None should work without exception."""
+            detector = PlayerDetector(cfg=cfg)
+            for _ in range(4):
+                detector.detect(_blank_frame())
+
+        # Should have fired on frame 1 and frame 4 = 2 calls total
+        assert mock_model.track.call_count == 2, (
+            f"With interval=3 and 4 frames, expected 2 YOLO calls, "
+            f"got {mock_model.track.call_count}"
+        )
+
+    def test_cached_result_returned_on_skipped_frames(self):
+        """Skipped frames return the same detection list as the previous YOLO call."""
         from models.player_yolo import PlayerDetector
 
-        cfg = _make_cfg()
+        cfg = _make_cfg(detect_interval=3)
+        with patch("models.player_yolo.YOLO") as mock_yolo_cls:
+            mock_model = MagicMock()
+            # First call returns 2 detections; subsequent calls return 0.
+            mock_model.track.side_effect = [
+                _make_mock_results(2),
+                _make_mock_results(0),
+            ]
+            mock_yolo_cls.return_value = mock_model
+
+            detector = PlayerDetector(cfg=cfg)
+            result_frame1 = detector.detect(_blank_frame())  # YOLO fires → 2 detections
+            result_frame2 = detector.detect(_blank_frame())  # cached
+            result_frame3 = detector.detect(_blank_frame())  # cached
+
+        # Frames 2 and 3 should return the cached result from frame 1
+        assert result_frame2 is result_frame1, (
+            "Frame 2 (skipped) should return the cached list object from frame 1"
+        )
+        assert result_frame3 is result_frame1, (
+            "Frame 3 (skipped) should return the cached list object from frame 1"
+        )
+
+    def test_interval_one_disables_gating(self):
+        """detect_interval=1 means YOLO fires on every frame."""
+        from models.player_yolo import PlayerDetector
+
+        cfg = _make_cfg(detect_interval=1)
+        with patch("models.player_yolo.YOLO") as mock_yolo_cls:
+            mock_model = MagicMock()
+            mock_model.track.return_value = _make_mock_results(0)
+            mock_yolo_cls.return_value = mock_model
+
+            detector = PlayerDetector(cfg=cfg)
+            for _ in range(5):
+                detector.detect(_blank_frame())
+
+        assert mock_model.track.call_count == 5, (
+            "With interval=1, YOLO should fire on every frame"
+        )
+
+    def test_device_passed_explicitly_to_track(self):
+        """model.track() must receive device= explicitly to prevent CPU fallback."""
+        from models.player_yolo import PlayerDetector
+
+        cfg = _make_cfg(detect_interval=1)
+        cfg.device = "cuda"
 
         with patch("models.player_yolo.YOLO") as mock_yolo_cls:
             mock_model = MagicMock()
             mock_model.track.return_value = _make_mock_results(0)
             mock_yolo_cls.return_value = mock_model
 
-            detector = PlayerDetector(cfg=cfg, mog2_manager=None)
-            result = detector.detect(_blank_frame())
+            detector = PlayerDetector(cfg=cfg)
+            detector.detect(_blank_frame())
 
-        assert isinstance(result, list)
+        _, kwargs = mock_model.track.call_args
+        assert "device" in kwargs, "device= must be passed to model.track()"
+        assert kwargs["device"] == "cuda", (
+            f"Expected device='cuda', got {kwargs.get('device')}"
+        )

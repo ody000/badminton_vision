@@ -29,8 +29,6 @@ def _make_cfg():
         tracknet_expected_h=288,
         tracknet_expected_w=512,
         fps=30.0,
-        mog2_warmup_frames=150,
-        mog2_foreground_thresh_shuttle=0.05,
     )
 
 

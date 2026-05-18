@@ -166,6 +166,7 @@ def precompute_heatmap(
     p2_color_bgr: tuple = (0, 165, 255),    # orange
     opacity: float = 0.5,
     stamp_radius: int = 6,
+    player_ids: list = None,
 ) -> np.ndarray:
     """Precompute a static player-footwork heatmap and save it as a PNG.
 
@@ -180,21 +181,29 @@ def precompute_heatmap(
         p2_color_bgr:     BGR tint for player 2 (orange).
         opacity:          Heatmap overlay opacity [0, 1] (default 0.5 = 50 %).
         stamp_radius:     Radius in insert-pixels of each position stamp.
+        player_ids:       List of player IDs to include (default [1, 2]).
 
     Returns:
         The saved BGR image (INSERT_H × INSERT_W, uint8).
     """
+    if player_ids is None:
+        player_ids = [1, 2]
+
     H = compute_homography(court_points, frame_h, frame_w)
 
-    hm_p1 = np.zeros((INSERT_H, INSERT_W), dtype=np.float32)
-    hm_p2 = np.zeros((INSERT_H, INSERT_W), dtype=np.float32)
+    # Create heatmap accumulators for each player
+    heatmaps = {pid: np.zeros((INSERT_H, INSERT_W), dtype=np.float32) for pid in player_ids}
+    player_colors = {player_ids[0]: p1_color_bgr}
+    if len(player_ids) > 1:
+        player_colors[player_ids[1]] = p2_color_bgr
 
     for frame in tracking_results:
         players = frame.get("players") or []
         for p in players:
             pid = p.get("id")
-            feet = p.get("feet")
-            if feet is None or pid not in (1, 2):
+            # Try feet_px first (video pixel coords), fall back to feet if it exists
+            feet = p.get("feet_px") or p.get("feet")
+            if feet is None or pid not in player_ids:
                 continue
             fx, fy = float(feet[0]), float(feet[1])
             if H is not None:
@@ -205,20 +214,23 @@ def precompute_heatmap(
                 iy = int(np.clip(_CY0 + fy * _CH / max(frame_h, 1), 0, INSERT_H - 1))
                 iy = INSERT_H - 1 - iy   # flip y
 
-            target = hm_p1 if pid == 1 else hm_p2
+            target = heatmaps[pid]
             cv2.circle(target, (ix, iy), stamp_radius, 1.0, -1)
 
     # Build tinted JET heatmaps
-    tinted_p1 = _make_tinted_jet(hm_p1, gaussian_sigma, p1_color_bgr, stamp_radius)
-    tinted_p2 = _make_tinted_jet(hm_p2, gaussian_sigma, p2_color_bgr, stamp_radius)
+    tinted_heatmaps = []
+    for pid in player_ids:
+        color = player_colors.get(pid, (57, 255, 20))
+        tinted = _make_tinted_jet(heatmaps[pid], gaussian_sigma, color, stamp_radius)
+        if tinted is not None:
+            tinted_heatmaps.append(tinted)
 
     # Start from the court background
     canvas = draw_court_background()
 
     # Blend each player heatmap at the requested opacity
-    for tinted in (tinted_p1, tinted_p2):
-        if tinted is not None:
-            canvas = cv2.addWeighted(canvas, 1.0 - opacity, tinted, opacity, 0)
+    for tinted in tinted_heatmaps:
+        canvas = cv2.addWeighted(canvas, 1.0 - opacity, tinted, opacity, 0)
 
     # Save
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)

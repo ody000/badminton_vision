@@ -29,17 +29,25 @@ class StrokeClassifier:
             self.trajectory_n = int(getattr(cfg, "stroke_trajectory_n", 6))
             self.pose_joints = int(getattr(cfg, "stroke_pose_joints", 33))
             weights_path = getattr(cfg, "stroke_weights", "models/stroke.pt")
+            # stroke_classify_enabled defaults to True for backward-compat, but
+            # config.yaml ships with it False so SLURM jobs skip MediaPipe load.
+            self._enabled = bool(getattr(cfg, "stroke_classify_enabled", True))
         else:
             self.trajectory_n = 6
             self.pose_joints = 33
             weights_path = "models/stroke.pt"
+            self._enabled = True
 
         # Feature dimension: 33*3 (pose joints x,y,visibility) + trajectory pre+post
         self.feature_dim = self.pose_joints * 3 + self.trajectory_n * 2 * 2
 
         self._model = None
         self._mp_pose = None
-        self._mp_pose_obj = None
+
+        if not self._enabled:
+            print("[STROKE] Stroke classification disabled (stroke_classify_enabled=false); "
+                  "skipping MediaPipe and model load.")
+            return
 
         # Initialize MediaPipe Pose
         try:
@@ -96,6 +104,10 @@ class StrokeClassifier:
             "decision_eval": None,
         }
 
+        # Fast-path: disabled or no model loaded.
+        if not self._enabled or self._model is None:
+            return null_result
+
         # Accept both HitEvent dataclass and legacy dict
         from core.tracking_types import HitEvent
         if isinstance(hit_event, HitEvent):
@@ -108,9 +120,6 @@ class StrokeClassifier:
             traj_post  = hit_event.get("trajectory_post", [])
 
         if keyframe is None:
-            return null_result
-
-        if self._model is None:
             return null_result
 
         import torch

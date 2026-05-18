@@ -18,6 +18,10 @@ tracknet_expected_h: 288
 tracknet_expected_w: 512
 tracknet_conf_threshold: 0.0001      # was 0.001 — accept lower-confidence detections
 tracknet_weights: models/tracknet.pt
+# Batch N frames into one GPU forward pass for ~3–5× higher throughput.
+# 8 is the standard default (SageMaker/Triton Inference Server) and fits
+# any OSCAR GPU at 9×288×512×float32 input size.
+tracknet_batch_size: 8
 
 # ─── Hit detection ───────────────────────────────────────────────────────────
 hit_trajectory_n: 6               # positions for quadratic fit (pre+post)
@@ -42,6 +46,11 @@ rally_min_hits: 0                 # was 1 — hit detection is separate; don't g
 player_conf_threshold: 0.5
 player_bytetrack_history: 1000
 player_weights: models/yolo.pt             # fine-tuned; falls back to yolov8n.pt
+# Run YOLO every N frames; return cached detections in between.
+# ByteTrack's Kalman state persists across the gap (persist=True).
+# N=3 → ~67% fewer YOLO calls; safe for badminton where players move
+# ~5–15 cm/frame at court scale.  Set to 1 to disable interval gating.
+player_detect_interval: 3
 
 # ─── Court ───────────────────────────────────────────────────────────────────
 court_real_width_cm: 610.0
@@ -52,6 +61,9 @@ court_points_file: data/input/court_points.json
 stroke_pose_joints: 33
 stroke_trajectory_n: 6
 stroke_weights: models/stroke.pt
+# Set to false to skip MediaPipe Pose init and model load during SLURM inference.
+# Re-enable (true) for local post-processing runs where stroke labels are needed.
+stroke_classify_enabled: false
 
 # ─── Visualization ───────────────────────────────────────────────────────────
 court_insert_h: 300

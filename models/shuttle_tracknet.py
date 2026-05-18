@@ -93,6 +93,91 @@ class TrackNetTracker:
         """Update the fps used for timestamp-gap flush detection."""
         self.fps = float(fps)
 
+    # ------------------------------------------------------------------
+    # Batched inference
+    # ------------------------------------------------------------------
+
+    def detect_batch(
+        self,
+        frames: list,
+        timestamps: list,
+    ) -> list:
+        """Run batched TrackNet inference on N frames in a single GPU call.
+
+        GPU utilisation is ~3–5× better than calling detect() N times because a
+        single (N×9×H×W) forward pass replaces N separate (1×9×H×W) passes.
+
+        Overlapping 3-frame triplets are built for each frame using the tracker's
+        internal buffer for cross-batch context: the last ≤2 frames from the
+        previous batch (or the beginning of the run) supply context to the first
+        1–2 frames of this batch, preserving the same temporal consistency that
+        the frame-by-frame detect() path provides.
+
+        Args:
+            frames:     List of N BGR frames (numpy uint8).
+            timestamps: List of N timestamps in seconds (same length).
+
+        Returns:
+            List of N detection dicts ({} or {"shuttle": (ts, x, y, w, h)}).
+        """
+        N = len(frames)
+        if N == 0:
+            return []
+
+        eh, ew = self.expected_size
+
+        # 1. Convert all frames to RGB once.
+        rgb_frames = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames]
+
+        # 2. Build context pool: last ≤2 buffered frames + this batch's frames.
+        #    pool[offset + i] == rgb_frames[i].
+        context = [entry[1] for entry in self._buffer[-2:]]
+        pool = context + rgb_frames
+        offset = len(context)
+
+        # 3. Build N triplets.  Triplet for frame i:
+        #      pool[clamp(i+offset-2)], pool[clamp(i+offset-1)], pool[i+offset]
+        batch_inputs = []
+        for i in range(N):
+            p2 = offset + i
+            p1 = max(0, p2 - 1)
+            p0 = max(0, p2 - 2)
+            triple = [pool[p0], pool[p1], pool[p2]]
+            resized = [cv2.resize(f, (ew, eh)) for f in triple]
+            batch_inputs.append(self._preprocess(resized))  # (1, 9, H, W)
+
+        # 4. Stack into (N, 9, H, W) and run one forward pass.
+        batch_tensor = torch.cat(batch_inputs, dim=0).to(self.device)
+        with torch.no_grad():
+            batch_out = self.model(batch_tensor)  # (N, C, H, W)
+        batch_np = batch_out.cpu().numpy()        # (N, C, H, W)
+
+        # 5. Decode each output heatmap.
+        results = []
+        for i, (frame_bgr, ts) in enumerate(zip(frames, timestamps)):
+            h, w = frame_bgr.shape[:2]
+            out_i = batch_np[i]                              # (C, H, W)
+            heat = out_i[0] if out_i.ndim == 3 else out_i   # (H, W)
+            x0, y0, bw, bh, conf = self._postprocess_heatmap(heat, w, h)
+            if conf >= self.conf_threshold:
+                results.append({
+                    "shuttle": (
+                        float(ts), float(x0), float(y0), float(bw), float(bh),
+                    )
+                })
+            else:
+                results.append({})
+
+        # 6. Update internal buffer with the last ≤3 frames from this batch
+        #    so the next batch has cross-batch context.
+        for i in range(max(0, N - 3), N):
+            self._buffer.append((timestamps[i], rgb_frames[i]))
+            if len(self._buffer) > 3:
+                self._buffer.pop(0)
+
+        self._frame_count += N
+        return results
+
     def _flush_buffer(self) -> None:
         self._buffer.clear()
 

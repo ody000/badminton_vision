@@ -13,15 +13,10 @@ Keyboard shortcuts:
     Space         Play / Pause
     Left / Right  Step one frame
     PgUp / PgDn   ±10 frames
-    Home / End    Jump to first / last frame
-    H             Toggle player boxes
-    S             Toggle shuttle circle
-    E             Toggle hit-event flash
-    M             Toggle court heatmap insert
     Q / Escape    Quit
 
-Buttons (sidebar row 2):
-    -10s / -5s / +5s / +10s   Time-based skip
+Buttons (sidebar):
+    Play  -20s / -5s / +5s / +20s   Playback control
 """
 
 from __future__ import annotations
@@ -53,21 +48,14 @@ except ImportError:
     )
     sys.exit(1)
 
-# Import court heatmap renderer at module level so any failure is visible.
-try:
-    from utils.visualization import render_court_insert as _render_court_insert
-    _HAS_VISUALIZATION = True
-except Exception as _vis_err:
-    print(f"[VIEWER] WARNING: court heatmap disabled — {_vis_err}")
-    _HAS_VISUALIZATION = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layout constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-SIDEBAR_W   = 230      # left control panel width
-PANEL_R_W   = 215      # right info panel width
+SIDEBAR_W   = 260      # left control panel width
+PANEL_R_W   = 224      # right info panel width
 TIMELINE_H  = 64       # timeline strip height
 WIN_PAD     = 8        # inner padding for child windows
 MAX_VID_W   = 1100     # max display width for the video panel
@@ -180,6 +168,7 @@ class Viewer:
         self.show_shuttle = True
         self.show_hits    = True
         self.show_heatmap = True
+        self.show_timeline = True
 
         # ── Heatmap cfg (minimal subset needed for rendering) ─────────
         self._heat_cfg = SimpleNamespace(
@@ -270,12 +259,19 @@ class Viewer:
         if self.tracking and court_points:
             print("[VIEWER] heatmap.png not found — computing from tracking data…")
             try:
+                # Detect actual player IDs from tracking data
+                player_ids = set()
+                for t in self.tracking:
+                    for p in t.get("players", []):
+                        player_ids.add(p.get("id"))
+
                 img = precompute_heatmap(
                     tracking_results=self.tracking,
                     court_points=court_points,
                     frame_w=self.vid_w,
                     frame_h=self.vid_h,
                     output_path=str(hm_path),
+                    player_ids=sorted(list(player_ids)) if player_ids else [1, 2],
                 )
                 self._heatmap_base = img
                 self._heatmap_w    = img.shape[1]
@@ -310,6 +306,9 @@ class Viewer:
             return
 
         canvas = self._heatmap_base.copy()
+
+        # Apply slight brightness boost to make heatmap more visible
+        canvas = cv2.convertScaleAbs(canvas, alpha=1.15, beta=0)
 
         t = self._tracking_by_frame.get(idx, {})
         for p in t.get("players", []):
@@ -499,29 +498,6 @@ class Viewer:
         cv2.putText(canvas, pill_txt, (15, 10 + ph + 2),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.46, pill_tcol, 1, cv2.LINE_AA)
 
-        # ── Court heatmap insert (bottom-right corner of video) ──────
-        if self.show_heatmap and _HAS_VISUALIZATION:
-            try:
-                history = self._history_at(idx)
-                sorted_ids = sorted(history.keys())[:2]
-                display_history = {pid: history[pid] for pid in sorted_ids if history[pid]}
-                if display_history:
-                    insert = _render_court_insert(display_history, self._heat_cfg)
-                    ih, iw = insert.shape[:2]
-                    margin = 8
-                    y0 = fh - ih - margin
-                    x0 = fw - iw - margin
-                    if y0 >= 0 and x0 >= 0:
-                        roi = canvas[y0:y0 + ih, x0:x0 + iw]
-                        cv2.addWeighted(insert, 0.92, roi, 0.08, 0, roi)
-                        # Thin white border so the insert is clearly visible
-                        cv2.rectangle(canvas,
-                                      (x0 - 1, y0 - 1),
-                                      (x0 + iw, y0 + ih),
-                                      (200, 200, 200), 1, cv2.LINE_AA)
-            except Exception as _e:
-                pass  # non-fatal; heatmap just won't show
-
         return canvas
 
     # ------------------------------------------------------------------
@@ -563,21 +539,33 @@ class Viewer:
     # ------------------------------------------------------------------
 
     def _update_info_panel(self, idx: int) -> None:
-        if not dpg.does_item_exist("inf_frame"):
+        if not dpg.does_item_exist("inf_time"):
             return
-        t      = self._tracking_by_frame.get(idx, {})
-        ts     = t.get("timestamp", idx / self.source_fps)
-        rally  = t.get("rally_active", False)
-        shut   = "detected" if t.get("shuttle") else "—"
-        npl    = len(t.get("players", []))
-        dpg.set_value("inf_frame",   f"{idx:>6d} / {self.total_frames - 1}")
-        dpg.set_value("inf_time",    f"{ts:.3f} s")
-        dpg.set_value("inf_rally",   "ACTIVE" if rally else "inactive")
+        t           = self._tracking_by_frame.get(idx, {})
+        ts          = t.get("timestamp", idx / self.source_fps)
+        total_dur   = self.total_frames / self.source_fps
+        rally       = t.get("rally_active", False)
+        shut        = "detected" if t.get("shuttle") else "—"
+
+        # Find most recent event at or before current frame
+        last_stroke = "—"
+        for ev in reversed(self.events):
+            if ev.get("frame_idx", 0) <= idx:
+                st   = (ev.get("stroke_type") or "?").upper()
+                pid  = ev.get("player_id")
+                plbl = f"P{pid}" if pid is not None else "?"
+                last_stroke = f"{plbl}  {st}"
+                break
+
+        dpg.set_value("inf_time",    f"{ts:.3f}s / {total_dur:.3f}s")
         dpg.set_value("inf_rally",   "ACTIVE" if rally else "inactive")
         dpg.configure_item("inf_rally",
                            color=list(C_GREEN) if rally else list(C_TEXT_DIM))
         dpg.set_value("inf_shuttle", shut)
-        dpg.set_value("inf_players", str(npl))
+        dpg.set_value("inf_stroke",  last_stroke)
+        # Update time slider
+        if dpg.does_item_exist("sl_time"):
+            dpg.set_value("sl_time", ts)
 
     # ------------------------------------------------------------------
     # Timeline
@@ -677,7 +665,8 @@ class Viewer:
         self.frame_idx = max(0, min(self.total_frames - 1, idx))
         # Any manual seek invalidates the sequential-read position.
         self._last_decoded_idx = -2
-        dpg.set_value("sl_frame", self.frame_idx)
+        if dpg.does_item_exist("sl_time"):
+            dpg.set_value("sl_time", self.frame_idx / self.source_fps)
         # DO NOT call _push_frame here — we are inside a DearPyGui callback
         # (fired from render_dearpygui_frame).  Doing video I/O from inside
         # the DearPyGui render pass causes a macOS segfault.  Instead, set a
@@ -698,10 +687,8 @@ class Viewer:
     def _cb_skip_f(self)     -> None: self._seek(self.frame_idx + 10)
     def _cb_skip_b5s(self)   -> None: self._seek(self.frame_idx - int(5  * self.source_fps))
     def _cb_skip_f5s(self)   -> None: self._seek(self.frame_idx + int(5  * self.source_fps))
-    def _cb_skip_b10s(self)  -> None: self._seek(self.frame_idx - int(10 * self.source_fps))
-    def _cb_skip_f10s(self)  -> None: self._seek(self.frame_idx + int(10 * self.source_fps))
-    def _cb_first(self)      -> None: self._seek(0)
-    def _cb_last(self)       -> None: self._seek(self.total_frames - 1)
+    def _cb_skip_b20s(self)  -> None: self._seek(self.frame_idx - int(20 * self.source_fps))
+    def _cb_skip_f20s(self)  -> None: self._seek(self.frame_idx + int(20 * self.source_fps))
 
     def _cb_frame_slider(self, _, val: int)   -> None: self._seek(int(val))
     def _cb_speed(self,        _, val: float) -> None: self.speed = float(val)
@@ -714,6 +701,10 @@ class Viewer:
         self.show_hits    = v; self._needs_render = self.frame_idx
     def _cb_tog_heatmap(self, _, v) -> None:
         self.show_heatmap = v; self._needs_render = self.frame_idx
+    def _cb_tog_timeline(self, _, v) -> None:
+        self.show_timeline = v
+        if dpg.does_item_exist("tl_panel"):
+            dpg.configure_item("tl_panel", show=v)
 
     def _cb_key(self, _, key: int) -> None:
         if   key == dpg.mvKey_Spacebar: self._cb_play_pause()
@@ -721,12 +712,6 @@ class Viewer:
         elif key == dpg.mvKey_Left:     self._cb_prev()
         elif key == dpg.mvKey_Next:     self._cb_skip_f()
         elif key == dpg.mvKey_Prior:    self._cb_skip_b()
-        elif key == dpg.mvKey_Home:     self._cb_first()
-        elif key == dpg.mvKey_End:      self._cb_last()
-        elif key == dpg.mvKey_H:      dpg.set_value("chk_players", not self.show_players); self._cb_tog_players(None, not self.show_players)
-        elif key == dpg.mvKey_S:      dpg.set_value("chk_shuttle", not self.show_shuttle); self._cb_tog_shuttle(None, not self.show_shuttle)
-        elif key == dpg.mvKey_E:      dpg.set_value("chk_hits",    not self.show_hits);    self._cb_tog_hits(None, not self.show_hits)
-        elif key == dpg.mvKey_M:      dpg.set_value("chk_heatmap", not self.show_heatmap); self._cb_tog_heatmap(None, not self.show_heatmap)
         elif key in (dpg.mvKey_Q, dpg.mvKey_Escape): dpg.stop_dearpygui()
 
     # ------------------------------------------------------------------
@@ -734,11 +719,18 @@ class Viewer:
     # ------------------------------------------------------------------
 
     def _section_label(self, text: str) -> None:
-        """Dimmed all-caps section header with separator."""
-        dpg.add_spacer(height=4)
-        dpg.add_text(text, color=list(C_TEXT_DIM))
+        """White all-caps section header with separator."""
+        dpg.add_spacer(height=6)
+        label_tag = f"label_{text.lower().replace(' ', '_')}"
+        text_item = dpg.add_text(text, color=list(C_TEXT), tag=label_tag)
+        # Try to increase font size using theme
+        try:
+            dpg.configure_item(label_tag, size=13)
+        except:
+            # If size parameter not supported, just continue with default
+            pass
         dpg.add_separator()
-        dpg.add_spacer(height=2)
+        dpg.add_spacer(height=3)
 
     def _build_ui(self) -> None:
         # Compute display dimensions
@@ -791,28 +783,25 @@ class Viewer:
                     )
 
                     self._section_label("PLAYBACK")
-                    # Row 1: boundary jump + play/pause (frame-step arrows removed;
-                    # use Left/Right keyboard keys for single-frame step)
+                    # Condensed row: play/pause and time-based skip buttons
                     with dpg.group(horizontal=True):
-                        dpg.add_button(label="|<",     width=32, callback=self._cb_first,      tag="btn_first")
-                        dpg.add_button(label="> Play", width=90, callback=self._cb_play_pause, tag="btn_play")
-                        dpg.add_button(label=">|",     width=32, callback=self._cb_last,        tag="btn_last")
-                    # Row 2: time-based skip buttons
-                    with dpg.group(horizontal=True):
-                        dpg.add_button(label="-10s", width=46, callback=self._cb_skip_b10s, tag="btn_skip_b10s")
-                        dpg.add_button(label="-5s",  width=40, callback=self._cb_skip_b5s,  tag="btn_skip_b5s")
-                        dpg.add_spacer(width=10)
-                        dpg.add_button(label="+5s",  width=40, callback=self._cb_skip_f5s,  tag="btn_skip_f5s")
-                        dpg.add_button(label="+10s", width=46, callback=self._cb_skip_f10s, tag="btn_skip_f10s")
+                        dpg.add_button(label="-20s", width=40, callback=self._cb_skip_b20s, tag="btn_skip_b20s")
+                        dpg.add_button(label="-5s",  width=35, callback=self._cb_skip_b5s,  tag="btn_skip_b5s")
+                        dpg.add_button(label="Play", width=60, callback=self._cb_play_pause, tag="btn_play")
+                        dpg.add_button(label="+5s",  width=35, callback=self._cb_skip_f5s,  tag="btn_skip_f5s")
+                        dpg.add_button(label="+20s", width=40, callback=self._cb_skip_f20s, tag="btn_skip_f20s")
 
-                    dpg.add_slider_int(
-                        tag="sl_frame",
-                        label="Frame",
-                        default_value=0,
-                        min_value=0,
-                        max_value=max(self.total_frames - 1, 1),
+                    # Time slider (in seconds)
+                    total_dur = self.total_frames / self.source_fps
+                    dpg.add_slider_float(
+                        tag="sl_time",
+                        label="Time",
+                        default_value=0.0,
+                        min_value=0.0,
+                        max_value=total_dur,
                         width=SIDEBAR_W - 18,
-                        callback=self._cb_frame_slider,
+                        callback=lambda _, v: self._seek(int(v * self.source_fps)),
+                        format="%.1f s",
                     )
                     dpg.add_slider_float(
                         tag="sl_speed",
@@ -832,8 +821,8 @@ class Viewer:
                                      default_value=True, callback=self._cb_tog_shuttle)
                     dpg.add_checkbox(tag="chk_hits",    label="Hit events  (E)",
                                      default_value=True, callback=self._cb_tog_hits)
-                    dpg.add_checkbox(tag="chk_heatmap", label="Court heatmap  (M)",
-                                     default_value=True, callback=self._cb_tog_heatmap)
+                    dpg.add_checkbox(tag="chk_timeline", label="Timeline",
+                                     default_value=True, callback=self._cb_tog_timeline)
 
                     self._section_label("ANALYTICS")
                     n_rallies  = self.analytics.get("rally_count", len(self.rally_data))
@@ -848,17 +837,18 @@ class Viewer:
                         dpg.add_text(f"  ID {pid_str}:  {cnt} hits", color=col)
 
                     self._section_label("KEYBOARD")
-                    for k, v in [
-                        ("Space",    "Play / Pause"),
-                        ("<- ->",    "Step frame"),
-                        ("PgUp/Dn", "±10 frames"),
-                        ("Home/End", "First / Last"),
-                        ("H S E M",  "Toggle overlays"),
-                        ("Q / Esc",  "Quit"),
-                    ]:
-                        with dpg.group(horizontal=True):
-                            dpg.add_text(f"{k:<10}", color=list(C_ACCENT))
-                            dpg.add_text(v, color=list(C_TEXT_DIM))
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("Space",       color=list(C_ACCENT))
+                        dpg.add_text("Play / Pause", color=list(C_TEXT_DIM))
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("<- ->",       color=list(C_ACCENT))
+                        dpg.add_text("Step frame", color=list(C_TEXT_DIM))
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("PgUp / PgDn", color=list(C_ACCENT))
+                        dpg.add_text("±10 frames", color=list(C_TEXT_DIM))
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("Q / Esc",    color=list(C_ACCENT))
+                        dpg.add_text("Quit",       color=list(C_TEXT_DIM))
 
                 # ── Centre column: video + timeline ───────────────────
                 with dpg.group():
@@ -903,46 +893,18 @@ class Viewer:
                                       height=vid_display_h + TIMELINE_H + WIN_PAD * 2,
                                       border=True):
 
-                    self._section_label("FRAME INFO")
+                    self._section_label("INFO")
                     for tag, lbl in [
-                        ("inf_frame",   "Frame   "),
                         ("inf_time",    "Time    "),
                         ("inf_rally",   "Rally   "),
                         ("inf_shuttle", "Shuttle "),
-                        ("inf_players", "Players "),
+                        ("inf_stroke",  "Stroke  "),
                     ]:
                         with dpg.group(horizontal=True):
                             dpg.add_text(lbl, color=list(C_TEXT_DIM))
                             dpg.add_text("—", tag=tag)
 
-                    self._section_label("RECENT EVENTS")
-                    # Show last 10 events, most recent first
-                    recent = self.events[-10:][::-1]
-                    for i, ev in enumerate(recent):
-                        ts   = ev.get("timestamp", 0.0)
-                        st   = (ev.get("stroke_type") or "?").upper()
-                        pid  = ev.get("player_id")
-                        plbl = f"P{pid}" if pid is not None else "?"
-                        col  = list(C_P1_RGBA) if pid == self._p1_id else list(C_P2_RGBA)
-                        fi   = ev.get("frame_idx", 0)
-                        row  = f"● {ts:6.2f}s  {plbl}  {st}"
-                        dpg.add_text(row, tag=f"ev_{i}", color=col)
-                        # Make events clickable to jump to that frame
-                        with dpg.item_handler_registry(tag=f"ev_hr_{i}"):
-                            dpg.add_item_clicked_handler(
-                                callback=lambda _, __, fi=fi: self._seek(fi)
-                            )
-                        dpg.bind_item_handler_registry(f"ev_{i}", f"ev_hr_{i}")
-
-                    self._section_label("PLAYERS")
-                    if self._p1_id is not None:
-                        dpg.add_text(f"P1  ID {self._p1_id}", color=list(C_P1_RGBA))
-                    if self._p2_id is not None:
-                        dpg.add_text(f"P2  ID {self._p2_id}", color=list(C_P2_RGBA))
-                    if self._p1_id is None and self._p2_id is None:
-                        dpg.add_text("No players detected", color=list(C_TEXT_DIM))
-
-                    self._section_label("FOOTWORK HEATMAP")
+                    self._section_label("COURT HEATMAP")
                     if self._heatmap_loaded and dpg.does_item_exist(self._heatmap_tex_tag):
                         dpg.add_image(
                             self._heatmap_tex_tag,
@@ -987,7 +949,8 @@ class Viewer:
                         self.playing = False
                         dpg.configure_item("btn_play", label="> Play")
                     self.frame_idx = next_idx
-                    dpg.set_value("sl_frame", self.frame_idx)
+                    if dpg.does_item_exist("sl_time"):
+                        dpg.set_value("sl_time", self.frame_idx / self.source_fps)
                     # _push_frame here is safe: we are NOT inside
                     # render_dearpygui_frame — the DearPyGui pass hasn't started.
                     self._push_frame(self.frame_idx)
