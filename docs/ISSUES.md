@@ -1,4 +1,31 @@
-# OSCAR SLURM Torch Import Issues
+# Issues & Resolutions
+
+## ✅ TrackNet Fine-tuning Failure — Switched to Slayminton Pretrained (May 18, 2026)
+
+**Problem:** Custom fine-tuned TrackNet model focused on white background dots instead of shuttlecock; ignored actual shuttle movement.
+
+**Root Cause:** Model overfitted to training data. Limited dataset (user's specific court) + white-dot artifacts in background → model learned spurious features instead of robust shuttle detection. Fine-tuned weights became worse than baseline.
+
+**Solution:** Abandoned custom fine-tuning; switched to Slayminton's pretrained TrackNetV2 weights (`slayminton/models/tracknet.pt` → `models/tracknet.pt`).
+
+**Why pretrained works better:**
+- Trained on 32k+ diverse badminton footage (not just single court)
+- Learns generalizable shuttle features instead of domain-specific artifacts
+- Avoids overfitting to white-dot anomalies
+- 88.49% accuracy on badminton test set
+
+**Implementation changes:**
+- Updated `models/shuttle_tracknet.py` to import from `slayminton.models.tracknet.TrackNet` (line 16)
+- Updated `training/train_tracknet.py` to import from slayminton (line 148)
+- Restored 44 MB weights file to `models/tracknet.pt`
+
+**Verification:** Tested on actual badminton footage — ✓ works correctly, tracks shuttlecock (not background).
+
+**Lesson:** When fine-tuning fails on limited data, pretrained models trained on diverse data often generalize better. Abandoned custom training; using proven baseline.
+
+---
+
+## ✅ OSCAR SLURM Torch Import Issues
 
 ## ✅ RESOLVED (May 16, 2026)
 

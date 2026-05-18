@@ -4,6 +4,9 @@ Key additions vs slayminton:
 - Timestamp-aware buffer: flush if gap > 2 * (1/fps) between frames
 - set_fps() method
 - Accepts cfg (SimpleNamespace) for config-driven init
+
+IMPORTANT: Uses slayminton's TrackNet implementation (with BatchNorm transpose hack)
+to maintain compatibility with their pretrained weights.
 """
 
 from __future__ import annotations
@@ -13,7 +16,7 @@ import cv2
 import numpy as np
 import torch
 
-from models.TrackNet import TrackNet
+from slayminton.models.tracknet import TrackNet
 
 
 class TrackNetTracker:
