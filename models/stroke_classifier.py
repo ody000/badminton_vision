@@ -88,11 +88,15 @@ class StrokeClassifier:
             print(f"[STROKE] Weights not found at {weights_path}; running in null mode.")
 
     def classify(self, hit_event) -> dict:
-        """Classify a hit event into stroke type and tactical labels.
+        """Classify a hit event using a temporal pose sequence around the hit (Phase 4-C).
+
+        If surrounding_frames is populated (T > 1), runs MediaPipe on each frame
+        and feeds the sequence to the Transformer. Falls back to keyframe-only
+        if surrounding_frames is empty (backward compatible).
 
         Args:
             hit_event: HitEvent dataclass (preferred) or legacy dict with keys
-                "keyframe", "trajectory_pre", "trajectory_post".
+                "keyframe", "trajectory_pre", "trajectory_post", "surrounding_frames".
 
         Returns:
             dict with keys: stroke_type, confidence, tactical_semantic, decision_eval
@@ -111,63 +115,63 @@ class StrokeClassifier:
         # Accept both HitEvent dataclass and legacy dict
         from core.tracking_types import HitEvent
         if isinstance(hit_event, HitEvent):
-            keyframe   = hit_event.keyframe
-            traj_pre   = hit_event.trajectory_pre
-            traj_post  = hit_event.trajectory_post
+            keyframe         = hit_event.keyframe
+            traj_pre         = hit_event.trajectory_pre
+            traj_post        = hit_event.trajectory_post
+            surrounding      = hit_event.surrounding_frames      # list of BGR arrays, may be empty
         else:
-            keyframe   = hit_event.get("keyframe")
-            traj_pre   = hit_event.get("trajectory_pre", [])
-            traj_post  = hit_event.get("trajectory_post", [])
+            keyframe         = hit_event.get("keyframe")
+            traj_pre         = hit_event.get("trajectory_pre", [])
+            traj_post        = hit_event.get("trajectory_post", [])
+            surrounding      = hit_event.get("surrounding_frames", [])
 
         if keyframe is None:
             return null_result
 
         import torch
 
-        # Extract features
-        pose_feats = self._extract_pose_features(keyframe)
-        if pose_feats is None:
-            pose_feats = np.zeros(self.pose_joints * 3, dtype=np.float32)
-        traj_feats  = self._extract_trajectory_features(traj_pre, traj_post)
+        # ── Pose feature extraction (Phase 4-C: multi-frame) ───────────────────
+        frames_to_process = surrounding if surrounding else [keyframe]
+        pose_seq = []
+        for frame in frames_to_process:
+            pose = self._extract_pose_features(frame)
+            if pose is None:
+                pose = np.zeros(self.pose_joints * 3, dtype=np.float32)
+            pose_seq.append(pose)
 
-        feature_vec = np.concatenate([pose_feats, traj_feats]).astype(np.float32)
-        x = torch.from_numpy(feature_vec).unsqueeze(0)  # (1, feature_dim)
+        # pose_seq: list of T arrays each (99,) → stack to (T, 99)
+        pose_tensor = torch.from_numpy(np.stack(pose_seq, axis=0)).unsqueeze(0)  # (1, T, 99)
+
+        # ── Trajectory features (same for all frames — fixed at hit moment) ──
+        traj_feats  = self._extract_trajectory_features(traj_pre, traj_post)     # (24,)
+        traj_tensor = torch.from_numpy(traj_feats).unsqueeze(0).unsqueeze(0)    # (1, 1, 24)
+        # Broadcast trajectory across all T frames
+        T = pose_tensor.shape[1]
+        traj_tensor = traj_tensor.expand(1, T, -1)                               # (1, T, 24)
+
+        x = torch.cat([pose_tensor, traj_tensor], dim=-1)   # (1, T, 123)
 
         try:
             with torch.no_grad():
                 logits = self._model(x)
-                # logits["foundational_actions"]: (1, 8)
                 fa_logits = logits.get("foundational_actions")
                 if fa_logits is None:
                     return null_result
-
                 probs = torch.softmax(fa_logits, dim=-1)
                 conf, idx = probs.max(dim=-1)
                 stroke_type = self.STROKE_TYPES[int(idx.item())]
-                confidence = float(conf.item())
+                confidence  = float(conf.item())
 
-                # Tactical semantic
                 ts_logits = logits.get("tactical_semantic")
-                if ts_logits is not None:
-                    ts_idx = int(torch.argmax(ts_logits, dim=-1).item())
-                    tactical = self.TACTICAL_LABELS[ts_idx] if ts_idx < len(self.TACTICAL_LABELS) else None
-                else:
-                    tactical = None
+                tactical  = (self.TACTICAL_LABELS[int(torch.argmax(ts_logits, -1).item())]
+                             if ts_logits is not None else None)
 
-                # Decision eval
                 de_logits = logits.get("decision_eval")
-                if de_logits is not None:
-                    de_idx = int(torch.argmax(de_logits, dim=-1).item())
-                    decision = self.DECISION_LABELS[de_idx] if de_idx < len(self.DECISION_LABELS) else None
-                else:
-                    decision = None
+                decision  = (self.DECISION_LABELS[int(torch.argmax(de_logits, -1).item())]
+                             if de_logits is not None else None)
 
-            return {
-                "stroke_type": stroke_type,
-                "confidence": confidence,
-                "tactical_semantic": tactical,
-                "decision_eval": decision,
-            }
+            return {"stroke_type": stroke_type, "confidence": confidence,
+                    "tactical_semantic": tactical, "decision_eval": decision}
         except Exception as e:
             print(f"[STROKE] classify error: {e}")
             return null_result

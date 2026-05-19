@@ -3,6 +3,7 @@
 #
 # Modes: train-tracknet | train-yolo | train-stroke | train-dino
 # For inference, use slurm_track.sh instead.
+# Phase 4-E: train-stroke now supports multi-frame pose sequences (T=7 temporal context)
 #
 # Brown OSCAR GPU partitions:
 #   gpu          — general GPU pool (V100/A100, up to 2 GPUs per job)
@@ -25,8 +26,10 @@
 #   # 2 GPUs, default partition (TrackNet)
 #   sbatch --export=MODE=train-tracknet slurm_train.sh
 #
-#   # 1 GPU (faster queue time for stroke classifier)
-#   sbatch -p gpu --gres=gpu:1 --export=MODE=train-stroke,NGPUS=1,FINEBADMINTON_DIR=/oscar/scratch/$USER/finebadminton20k slurm_train.sh
+#   # Stroke classifier (multi-frame, Phase 4-E) — 1 GPU, ~30 minutes
+#   sbatch -p gpu --gres=gpu:1 --mem=32G \
+#     --export=MODE=train-stroke,NGPUS=1,EPOCHS=30,BATCH_SIZE=8,LR=3e-4,FINEBADMINTON_DIR=/users/$USER/scratch/finebadminton20k \
+#     slurm_train.sh
 #
 # NOTE: #SBATCH directives are parsed as literal text — shell variables do NOT
 # expand inside them.  Override --partition and --gres on the sbatch command

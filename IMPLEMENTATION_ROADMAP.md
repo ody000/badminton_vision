@@ -806,6 +806,290 @@ sigma = 2.0 * (expected_h / 288.0)  # was fixed at 2.0
 
 ---
 
+## Phase 4 — StrokeTransformer: Temporal Multi-Frame Pose Sequence
+
+### State of existing `models/stroke.pt`
+
+- **File exists** at `models/stroke.pt` (~1.1MB = ~283K params × 4 bytes ✓ — a real trained checkpoint).
+- **Saved on a GPU node.** `torch.save()` records tensor device. The file has CUDA tensors, so loading it on a CPU-only machine (e.g. the `vscode1` login node) fails with `RuntimeError: Attempting to deserialize object on a CUDA device`. To inspect it on a CPU machine: `torch.load('models/stroke.pt', map_location='cpu')`.
+- **Trained on single-frame sequences.** These weights were produced with the old `seq_len=1` path and are being discarded in favour of the multi-frame retrain below. Do not attempt to resume from them — start fresh.
+- **Retrain is fast.** ~283K parameters, expected convergence in <30 minutes on a single OSCAR GPU.
+
+---
+
+### Background and design rationale
+
+`StrokeClassifier` currently extracts MediaPipe Pose keypoints from **one frame only** — the frame on which `is_hit` fires — and feeds a flat 123-float vector to the StrokeTransformer. The Transformer receives a sequence of length 1, so its self-attention is the identity operation and it degenerates to a 2-layer MLP. The architecture is unused as designed.
+
+The fix: collect **T frames around the hit** (default T=7: 3 before, the hit frame, 3 after), run MediaPipe on each, and feed a genuine pose sequence `(T, 99)` to the Transformer. Self-attention then models how joint positions evolve through the stroke — the pre-swing extension, contact point, and follow-through — which is highly discriminative across stroke types.
+
+**Computational cost of multi-frame MediaPipe:**
+- MediaPipe Pose `model_complexity=1` on CPU: ~30–40ms per frame
+- ~60 hits per 2-minute match × 7 frames × 35ms ≈ 15 seconds total overhead
+- Current pipeline: ~240 seconds (4 minutes) for a 2-minute video
+- Overhead fraction: ~6% — acceptable
+
+**Key constraint:** Pre-hit frames are gone by the time `is_hit` fires. The pipeline must maintain a sliding window buffer of raw BGR frames. Post-hit frames require deferring event emission by N frames.
+
+---
+
+### 4-A: Add `surrounding_frames` to `HitEvent`
+
+**File: `core/tracking_types.py`**
+
+Find the `HitEvent` dataclass and add the new field:
+
+```python
+@dataclass
+class HitEvent:
+    keyframe: np.ndarray                        # existing — frame at hit detection moment
+    trajectory_pre: list                        # existing
+    trajectory_post: list                       # existing
+    surrounding_frames: list[np.ndarray] = field(default_factory=list)  # NEW — T BGR frames around hit
+    surrounding_timestamps: list[float]  = field(default_factory=list)  # NEW — corresponding timestamps
+```
+
+Import `field` from `dataclasses` if not already imported at the top of the file.
+
+---
+
+### 4-B: Sliding frame window in `main.py`
+
+**File: `main.py`**
+
+Add these constants near the top of `run()`, before the frame loop:
+
+```python
+# ── Stroke surrounding-frame buffer ───────────────────────────────────────────
+# Keeps a rolling window of recent raw frames so StrokeClassifier can access
+# pre-hit frames after hit detection fires (hit detection is inherently delayed).
+_STROKE_PRE_FRAMES  = int(getattr(cfg, "stroke_pre_frames",  3))   # frames before hit
+_STROKE_POST_FRAMES = int(getattr(cfg, "stroke_post_frames", 3))   # frames after hit
+_STROKE_WINDOW      = _STROKE_PRE_FRAMES + 1 + _STROKE_POST_FRAMES # total T
+
+from collections import deque
+_frame_window: deque[tuple[np.ndarray, int, float]] = deque(
+    maxlen=_STROKE_PRE_FRAMES + 1   # only need to buffer pre-hit frames; post collected on the fly
+)
+
+# Pending hit events waiting for post-hit frames before being emitted
+# Each entry: {"event_dict": dict, "frames_needed": int, "post_frames": list[np.ndarray]}
+_pending_hits: list[dict] = []
+```
+
+Inside `_process_frame`, append the current frame to the window **before** the hit detection block:
+
+```python
+def _process_frame(frame_bgr, frame_idx, timestamp, shuttle_det_dict):
+    nonlocal final_timestamp
+    final_timestamp = timestamp
+
+    # Keep rolling window of raw frames for multi-frame stroke pose extraction
+    _frame_window.append((frame_bgr.copy(), frame_idx, timestamp))
+
+    # ... rest of existing _process_frame logic ...
+```
+
+Replace the hit-event construction block (currently the `if is_hit:` block) with:
+
+```python
+if is_hit:
+    # Collect pre-hit frames from the rolling window
+    pre_frames = [f for f, _, _ in _frame_window]           # up to _STROKE_PRE_FRAMES + 1 frames
+    pre_ts     = [t for _, _, t in _frame_window]
+
+    hit_ev = HitEvent(
+        keyframe=frame_bgr,
+        trajectory_pre=[(e[0], e[1], e[2]) for e in hit_detector._buffer],
+        trajectory_post=[],
+        surrounding_frames=list(pre_frames),                 # pre-hit frames collected now
+        surrounding_timestamps=list(pre_ts),
+    )
+
+    if _STROKE_POST_FRAMES > 0:
+        # Defer emission: collect post-hit frames before classifying
+        _pending_hits.append({
+            "hit_ev":        hit_ev,
+            "timestamp":     timestamp,
+            "frame_idx":     frame_idx,
+            "hit_player_id": hit_player_id,
+            "frames_left":   _STROKE_POST_FRAMES,
+        })
+    else:
+        # No post frames needed — classify immediately (original behaviour)
+        _emit_stroke_event(hit_ev, timestamp, frame_idx, hit_player_id)
+
+# Fulfil pending hits that are waiting for post-hit frames
+still_pending = []
+for pending in _pending_hits:
+    pending["hit_ev"].surrounding_frames.append(frame_bgr.copy())
+    pending["hit_ev"].surrounding_timestamps.append(timestamp)
+    pending["frames_left"] -= 1
+    if pending["frames_left"] <= 0:
+        _emit_stroke_event(
+            pending["hit_ev"],
+            pending["timestamp"],
+            pending["frame_idx"],
+            pending["hit_player_id"],
+        )
+    else:
+        still_pending.append(pending)
+_pending_hits[:] = still_pending
+```
+
+Add the helper function `_emit_stroke_event` inside `run()`, before `_process_frame`:
+
+```python
+def _emit_stroke_event(hit_ev: HitEvent, timestamp: float, frame_idx: int, hit_player_id) -> None:
+    """Classify and append a completed hit event (pre + post frames available)."""
+    stroke_result = stroke_classifier.classify(hit_ev)
+    event = {
+        "timestamp":       timestamp,
+        "frame_idx":       frame_idx,
+        "player_id":       hit_player_id,
+        "stroke_type":     stroke_result.get("stroke_type"),
+        "confidence":      stroke_result.get("confidence", 0.0),
+        "tactical_semantic": stroke_result.get("tactical_semantic"),
+        "decision_eval":   stroke_result.get("decision_eval"),
+        "trajectory_pre":  hit_ev.trajectory_pre,
+        "trajectory_post": [],
+        "prediction_error": None,
+    }
+    events.append(event)
+```
+
+After the main frame loop ends (after `_flush_batch()` / sequential path), flush any remaining pending hits:
+
+```python
+# Flush pending hits that reached end of video without enough post frames
+for pending in _pending_hits:
+    _emit_stroke_event(
+        pending["hit_ev"],
+        pending["timestamp"],
+        pending["frame_idx"],
+        pending["hit_player_id"],
+    )
+_pending_hits.clear()
+```
+
+**File: `config.yaml`** — add:
+
+```yaml
+# ─── Stroke classifier (multi-frame) ─────────────────────────────────────────
+stroke_classify_enabled: true        # re-enable now that multi-frame is supported
+stroke_pre_frames: 3                 # frames before hit to include in pose sequence
+stroke_post_frames: 3                # frames after hit to include (defers event emission)
+```
+
+---
+
+### 4-C: Multi-frame pose extraction in `StrokeClassifier`
+
+**File: `models/stroke_classifier.py`**
+
+Replace `_extract_pose_features` and `classify` with multi-frame–aware versions:
+
+```python
+def classify(self, hit_event) -> dict:
+    """Classify a hit event using a temporal pose sequence around the hit.
+
+    If surrounding_frames is populated (T > 1), runs MediaPipe on each frame
+    and feeds the sequence to the Transformer. Falls back to keyframe-only
+    if surrounding_frames is empty (backward compatible).
+    """
+    null_result = {
+        "stroke_type": None, "confidence": 0.0,
+        "tactical_semantic": None, "decision_eval": None,
+    }
+    if not self._enabled or self._model is None:
+        return null_result
+
+    from core.tracking_types import HitEvent
+    if isinstance(hit_event, HitEvent):
+        keyframe         = hit_event.keyframe
+        traj_pre         = hit_event.trajectory_pre
+        traj_post        = hit_event.trajectory_post
+        surrounding      = hit_event.surrounding_frames      # list of BGR arrays, may be empty
+    else:
+        keyframe         = hit_event.get("keyframe")
+        traj_pre         = hit_event.get("trajectory_pre", [])
+        traj_post        = hit_event.get("trajectory_post", [])
+        surrounding      = hit_event.get("surrounding_frames", [])
+
+    if keyframe is None:
+        return null_result
+
+    import torch
+
+    # ── Pose feature extraction ───────────────────────────────────────────
+    frames_to_process = surrounding if surrounding else [keyframe]
+    pose_seq = []
+    for frame in frames_to_process:
+        pose = self._extract_pose_features(frame)
+        if pose is None:
+            pose = np.zeros(self.pose_joints * 3, dtype=np.float32)
+        pose_seq.append(pose)
+
+    # pose_seq: list of T arrays each (99,) → stack to (T, 99)
+    pose_tensor = torch.from_numpy(np.stack(pose_seq, axis=0)).unsqueeze(0)  # (1, T, 99)
+
+    # ── Trajectory features (same for all frames — fixed at hit moment) ──
+    traj_feats  = self._extract_trajectory_features(traj_pre, traj_post)     # (24,)
+    traj_tensor = torch.from_numpy(traj_feats).unsqueeze(0).unsqueeze(0)    # (1, 1, 24)
+    # Broadcast trajectory across all T frames
+    T = pose_tensor.shape[1]
+    traj_tensor = traj_tensor.expand(1, T, -1)                               # (1, T, 24)
+
+    x = torch.cat([pose_tensor, traj_tensor], dim=-1)   # (1, T, 123)
+
+    try:
+        with torch.no_grad():
+            logits = self._model(x)
+            fa_logits = logits.get("foundational_actions")
+            if fa_logits is None:
+                return null_result
+            probs = torch.softmax(fa_logits, dim=-1)
+            conf, idx = probs.max(dim=-1)
+            stroke_type = self.STROKE_TYPES[int(idx.item())]
+            confidence  = float(conf.item())
+
+            ts_logits = logits.get("tactical_semantic")
+            tactical  = (self.TACTICAL_LABELS[int(torch.argmax(ts_logits, -1).item())]
+                         if ts_logits is not None else None)
+
+            de_logits = logits.get("decision_eval")
+            decision  = (self.DECISION_LABELS[int(torch.argmax(de_logits, -1).item())]
+                         if de_logits is not None else None)
+
+        return {"stroke_type": stroke_type, "confidence": confidence,
+                "tactical_semantic": tactical, "decision_eval": decision}
+    except Exception as e:
+        print(f"[STROKE] classify error: {e}")
+        return null_result
+```
+
+---
+
+### 4-D: Update `StrokeTransformer` to handle variable sequence length
+
+**File: `models/stroke_transformer.py`**
+
+The model already handles variable `seq_len` via `encoded.mean(dim=1)` (mean pooling). **No architecture change is needed.** The only change is that `input_dim` must match the per-frame feature dimension, which remains `123` (pose 99 + trajectory 24). The sequence dimension T now varies from 1 to 7 depending on how many frames were available — mean pooling handles this gracefully.
+
+However, the model **must be retrained** with multi-frame sequences for the attention layers to learn temporal patterns. Until retraining, the existing weights will still function (they'll receive `(1, T, 123)` and mean-pool to the same `(1, 128)` representation they were trained on, treating all T frames equally). The model will not regress — it will still produce valid stroke type predictions — but it won't yet exploit temporal dynamics. Retraining is Phase 4-E.
+
+---
+
+### 4-E: Retrain `StrokeTransformer` on multi-frame sequences
+
+The FineBadminton20k dataset provides per-event video clips, making it possible to extract multi-frame pose sequences for training. The training script `training/train_stroke.py` needs a dataset variant that returns `(T, 123)` tensors rather than `(123,)`.
+
+**Approximate training effort:** StrokeTransformer has ~283K parameters. On 20k samples with T=7, training converges in <30 minutes on a single GPU. This is by far the smallest training job in the pipeline.
+
+Expected improvement: stroke type accuracy should rise from the ~60–70% achievable with single-frame pose to ~80–90% with 7-frame temporal context, consistent with published results on sports action recognition with similar sequence lengths.
+
+---
+
 ## Estimated performance after all changes
 
 | Metric | Current | After P0 fix only | After P0 + Phase 1 | After P0 + Phase 1 + V3 |

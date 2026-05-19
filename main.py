@@ -147,6 +147,22 @@ def run(
     events: list[dict] = []
     final_timestamp = 0.0
 
+    # ── Stroke surrounding-frame buffer (Phase 4-B) ───────────────────────────
+    # Keeps a rolling window of recent raw frames so StrokeClassifier can access
+    # pre-hit frames after hit detection fires (hit detection is inherently delayed).
+    _STROKE_PRE_FRAMES  = int(getattr(cfg, "stroke_pre_frames",  3))   # frames before hit
+    _STROKE_POST_FRAMES = int(getattr(cfg, "stroke_post_frames", 3))   # frames after hit
+    _STROKE_WINDOW      = _STROKE_PRE_FRAMES + 1 + _STROKE_POST_FRAMES # total T
+
+    from collections import deque
+    _frame_window: deque[tuple[np.ndarray, int, float]] = deque(
+        maxlen=_STROKE_PRE_FRAMES + 1   # only need to buffer pre-hit frames; post collected on the fly
+    )
+
+    # Pending hit events waiting for post-hit frames before being emitted
+    # Each entry: {"hit_ev": HitEvent, "timestamp": float, "frame_idx": int, "hit_player_id": int, "frames_left": int}
+    _pending_hits: list[dict] = []
+
     # ── Batched vs sequential TrackNet ────────────────────────────────────────
     # detect_batch() amortises GPU kernel launch overhead across N frames, giving
     # ~3–5× better GPU utilisation.  On CPU there is no hardware parallelism, so
@@ -157,6 +173,23 @@ def run(
     BATCH = int(getattr(cfg, "tracknet_batch_size", 8))
     frame_buffer: list[tuple] = []  # (frame_bgr, frame_idx, timestamp)
 
+    def _emit_stroke_event(hit_ev: HitEvent, timestamp: float, frame_idx: int, hit_player_id) -> None:
+        """Classify and append a completed hit event (pre + post frames available)."""
+        stroke_result = stroke_classifier.classify(hit_ev)
+        event = {
+            "timestamp":       timestamp,
+            "frame_idx":       frame_idx,
+            "player_id":       hit_player_id,
+            "stroke_type":     stroke_result.get("stroke_type"),
+            "confidence":      stroke_result.get("confidence", 0.0),
+            "tactical_semantic": stroke_result.get("tactical_semantic"),
+            "decision_eval":   stroke_result.get("decision_eval"),
+            "trajectory_pre":  hit_ev.trajectory_pre,
+            "trajectory_post": [],
+            "prediction_error": None,
+        }
+        events.append(event)
+
     def _process_frame(
         frame_bgr: np.ndarray,
         frame_idx: int,
@@ -166,6 +199,9 @@ def run(
         nonlocal final_timestamp
         final_timestamp = timestamp
         h, w = frame_bgr.shape[:2]
+
+        # Keep rolling window of raw frames for multi-frame stroke pose extraction (Phase 4-B)
+        _frame_window.append((frame_bgr.copy(), frame_idx, timestamp))
 
         # 1. Shuttle
         shuttle_tuple = shuttle_det_dict.get("shuttle")  # (ts, x, y, w, h) or None
@@ -192,28 +228,49 @@ def run(
             player_feet_for_hit,
         )
 
-        # 4. Stroke classification on hit
+        # 4. Stroke classification on hit (Phase 4-B: deferred emission for multi-frame)
         if is_hit:
-            traj_pre = list(hit_detector._buffer)  # [(ts, x, y), ...]
+            # Collect pre-hit frames from the rolling window
+            pre_frames = [f for f, _, _ in _frame_window]           # up to _STROKE_PRE_FRAMES + 1 frames
+            pre_ts     = [t for _, _, t in _frame_window]
+
             hit_ev = HitEvent(
                 keyframe=frame_bgr,
-                trajectory_pre=[(e[0], e[1], e[2]) for e in traj_pre],
+                trajectory_pre=[(e[0], e[1], e[2]) for e in hit_detector._buffer],
                 trajectory_post=[],
+                surrounding_frames=list(pre_frames),                 # pre-hit frames collected now
+                surrounding_timestamps=list(pre_ts),
             )
-            stroke_result = stroke_classifier.classify(hit_ev)
-            event = {
-                "timestamp": timestamp,
-                "frame_idx": frame_idx,
-                "player_id": hit_player_id,
-                "stroke_type": stroke_result.get("stroke_type"),
-                "confidence": stroke_result.get("confidence", 0.0),
-                "tactical_semantic": stroke_result.get("tactical_semantic"),
-                "decision_eval": stroke_result.get("decision_eval"),
-                "trajectory_pre": hit_ev.trajectory_pre,
-                "trajectory_post": [],
-                "prediction_error": None,
-            }
-            events.append(event)
+
+            if _STROKE_POST_FRAMES > 0:
+                # Defer emission: collect post-hit frames before classifying
+                _pending_hits.append({
+                    "hit_ev":        hit_ev,
+                    "timestamp":     timestamp,
+                    "frame_idx":     frame_idx,
+                    "hit_player_id": hit_player_id,
+                    "frames_left":   _STROKE_POST_FRAMES,
+                })
+            else:
+                # No post frames needed — classify immediately (original behaviour)
+                _emit_stroke_event(hit_ev, timestamp, frame_idx, hit_player_id)
+
+        # Fulfil pending hits that are waiting for post-hit frames (Phase 4-B)
+        still_pending = []
+        for pending in _pending_hits:
+            pending["hit_ev"].surrounding_frames.append(frame_bgr.copy())
+            pending["hit_ev"].surrounding_timestamps.append(timestamp)
+            pending["frames_left"] -= 1
+            if pending["frames_left"] <= 0:
+                _emit_stroke_event(
+                    pending["hit_ev"],
+                    pending["timestamp"],
+                    pending["frame_idx"],
+                    pending["hit_player_id"],
+                )
+            else:
+                still_pending.append(pending)
+        _pending_hits[:] = still_pending
 
         # 5. Update game state
         game_state.update(timestamp, shuttle_tuple, frame_size=(h, w))
@@ -268,6 +325,16 @@ def run(
 
     if _use_batched:
         _flush_batch()  # process any remaining frames (tail of video)
+
+    # Flush pending hits that reached end of video without enough post frames (Phase 4-B)
+    for pending in _pending_hits:
+        _emit_stroke_event(
+            pending["hit_ev"],
+            pending["timestamp"],
+            pending["frame_idx"],
+            pending["hit_player_id"],
+        )
+    _pending_hits.clear()
 
     video_io.release()
 

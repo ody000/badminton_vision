@@ -91,8 +91,12 @@ class HitEvent:
     trajectory_post: list of (t, x_px, y_px) tuples *after* the hit
                      (empty when classifying in real-time).
     keyframe:        BGR np.ndarray of the frame at hit time, or None.
+    surrounding_frames:     list of BGR np.ndarray frames around hit (Phase 4-A multi-frame).
+    surrounding_timestamps: list of float timestamps for surrounding_frames.
     """
 
     trajectory_pre: List[Tuple[float, float, float]] = field(default_factory=list)
     trajectory_post: List[Tuple[float, float, float]] = field(default_factory=list)
     keyframe: Optional[object] = None  # np.ndarray | None — avoids numpy import here
+    surrounding_frames: List[object] = field(default_factory=list)  # list of BGR np.ndarray
+    surrounding_timestamps: List[float] = field(default_factory=list)

@@ -58,13 +58,13 @@ court_real_width_cm: 610.0
 court_real_length_cm: 1340.0
 court_points_file: data/input/court_points.json
 
-# ─── Stroke classifier ───────────────────────────────────────────────────────
+# ─── Stroke classifier (Phase 4: multi-frame) ──────────────────────────────
+stroke_classify_enabled: true         # re-enable now that multi-frame is supported
 stroke_pose_joints: 33
 stroke_trajectory_n: 6
 stroke_weights: models/stroke.pt
-# Set to false to skip MediaPipe Pose init and model load during SLURM inference.
-# Re-enable (true) for local post-processing runs where stroke labels are needed.
-stroke_classify_enabled: false
+stroke_pre_frames: 3                  # frames before hit to include in pose sequence (Phase 4-B)
+stroke_post_frames: 3                 # frames after hit to include (defers event emission)
 
 # ─── Visualization ───────────────────────────────────────────────────────────
 court_insert_h: 300
