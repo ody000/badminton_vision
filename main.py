@@ -32,6 +32,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import torch
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,7 +90,14 @@ def run(
 
     # ── Initialize components ─────────────────────────────────────────────────
     tracknet = TrackNetTracker(cfg=cfg)
-    yolo = PlayerDetector(cfg=cfg)
+    device = torch.device(getattr(cfg, "device", "cuda" if torch.cuda.is_available() else "cpu"))
+    yolo = PlayerDetector(
+        model_path=getattr(cfg, "player_model_path", None),
+        weights_path=getattr(cfg, "player_weights_path", None),
+        pretrained_backbone_path=getattr(cfg, "pretrained_backbone_path", None),
+        device=device,
+        input_size=getattr(cfg, "player_input_size", 384),
+    )
 
     court_mapper = CourtMapper(cfg)
     court_points_file = getattr(cfg, "court_points_file", "data/input/court_points.json")
@@ -141,7 +149,7 @@ def run(
         shuttle: Shuttle | None = Shuttle.from_tuple(shuttle_tuple) if shuttle_tuple else None
 
         # 2. Player detection + real-world transform + history accumulation
-        raw_players = yolo.detect(frame_bgr)
+        raw_players = yolo.detect_yolo_compat(frame_bgr)
         players = player_ctx.update(raw_players, court_mapper)
 
         # 3. Hit detection

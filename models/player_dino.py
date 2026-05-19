@@ -234,6 +234,66 @@ class DINOTracker(nn.Module):
 
         return outputs
 
+    def detect_yolo_compat(
+        self,
+        frame,
+        timestamp: float = 0.0,
+        min_confidence: float = MIN_CONFIDENCE,
+    ) -> List[dict]:
+        """Detect player in frame, returning YOLO-compatible format.
+
+        Returns a list of dicts with "id", "box", and "feet" keys for
+        compatibility with player_context.py and other pipeline components.
+
+        Args:
+            frame: Input frame (numpy HxWx3, grayscale HxW, or torch tensor)
+            timestamp: Frame timestamp (unused, kept for API compatibility)
+            min_confidence: Confidence threshold
+
+        Returns:
+            [{"id": 0, "box": [x1, y1, x2, y2], "feet": (cx, y2), "feet_real": None}]
+            or [] if no detection
+        """
+        result = self.detect(frame, timestamp, min_confidence)
+        player_det = result.get("player")
+
+        if player_det is None:
+            return []
+
+        ts, x, y, w, h = player_det
+        # Get frame dimensions for feet calculation
+        if isinstance(frame, np.ndarray):
+            orig_h, orig_w = frame.shape[:2]
+        elif isinstance(frame, torch.Tensor):
+            orig_h, orig_w = int(frame.shape[1]), int(frame.shape[2])
+        else:
+            orig_h, orig_w = 1080, 1920  # fallback
+
+        # Convert xywh to x1y1x2y2 format
+        x1 = x
+        y1 = y
+        x2 = x + w
+        y2 = y + h
+
+        # Clamp to frame bounds
+        x1 = max(0.0, min(x1, orig_w - 1.0))
+        y1 = max(0.0, min(y1, orig_h - 1.0))
+        x2 = max(x1 + 1.0, min(x2, orig_w))
+        y2 = max(y1 + 1.0, min(y2, orig_h))
+
+        # Feet: center x, bottom y
+        cx = (x1 + x2) / 2.0
+        feet = (cx, y2)
+
+        return [
+            {
+                "id": 0,  # DINOTracker detects single player
+                "box": [x1, y1, x2, y2],
+                "feet": feet,
+                "feet_real": None,  # filled later by CourtMapper
+            }
+        ]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATASET

@@ -5,6 +5,7 @@
 /logs/
 /weights/
 *.onnx
+*.pt
 
 # ============ PYTHON CACHE ============
 # Bytecode, caches, and compiled files
