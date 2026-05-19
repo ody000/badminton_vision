@@ -63,6 +63,7 @@ def run(
     from utils.video_io import VideoIOHandler
     from utils.visualization import render_court_insert, render_frame
     from models.shuttle_tracknet import TrackNetTracker
+    from models.shuttle_tracknetv3 import TrackNetV3Tracker
     from models.player_dino import PlayerDetector
     from models.stroke_classifier import StrokeClassifier
     from core.homography import CourtMapper
@@ -90,7 +91,18 @@ def run(
     print(f"[MAIN] run_dir={run_dir}")
 
     # ── Initialize components ─────────────────────────────────────────────────
-    tracknet = TrackNetTracker(cfg=cfg)
+    # Determine which TrackNet version to use
+    _use_v3 = bool(getattr(cfg, "tracknet_version", 3)) == 3
+    if _use_v3:
+        from utils.background import estimate_background
+        _bg_frames = int(getattr(cfg, "tracknet_bg_frames", 150))
+        print(f"[MAIN] Estimating video background from first {_bg_frames} frames...")
+        _background = estimate_background(video_path, n_frames=_bg_frames,
+                                          resize_hw=(int(getattr(cfg, "tracknet_expected_h", 288)),
+                                                     int(getattr(cfg, "tracknet_expected_w", 512))))
+        tracknet = TrackNetV3Tracker(cfg=cfg, background=_background)
+    else:
+        tracknet = TrackNetTracker(cfg=cfg)
     device = torch.device(getattr(cfg, "device", "cuda" if torch.cuda.is_available() else "cpu"))
     yolo = PlayerDetector(
         model_path=getattr(cfg, "player_model_path", None),
@@ -99,9 +111,16 @@ def run(
         device=device,
         input_size=getattr(cfg, "player_input_size", 384),
     )
-    print(f"[MAIN] CUDA diagnostic: torch.cuda.is_available()={torch.cuda.is_available()}, yolo.encoder.device={next(yolo.encoder.parameters()).device}")
-    tracknet_device = tracknet.model.device if hasattr(tracknet.model, "device") else next(tracknet.model.parameters()).device
-    print(f"[MAIN] TrackNet device: {tracknet_device}")
+    # ── CUDA diagnostic (Priority 0 verification) ───────────────────────────────
+    print(f"[MAIN] CUDA diagnostic: "
+          f"torch.cuda.is_available()={torch.cuda.is_available()}, "
+          f"yolo.encoder.device={next(yolo.encoder.parameters()).device}, "
+          f"tracknet.model.device={next(tracknet.model.parameters()).device}")
+
+    # ── Phase 1-B: Player detection interval caching ─────────────────────────────
+    _player_interval = int(getattr(cfg, "player_detect_interval", 1))
+    yolo.set_detect_interval(_player_interval)
+    print(f"[MAIN] DINOTracker interval caching: every {_player_interval} frame(s)")
 
     court_mapper = CourtMapper(cfg)
     court_points_file = getattr(cfg, "court_points_file", "data/input/court_points.json")

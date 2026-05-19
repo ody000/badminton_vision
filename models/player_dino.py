@@ -148,12 +148,21 @@ class DINOTracker(nn.Module):
 
         self.eval()
 
+        # Interval caching for detect_yolo_compat
+        self._detect_interval: int = 1       # overridden by set_detect_interval()
+        self._detect_frame_count: int = 0
+        self._detect_cache: list = []        # last result from detect_yolo_compat
+
+    def set_detect_interval(self, interval: int) -> None:
+        """Set how often to run a real forward pass vs return cached result."""
+        self._detect_interval = max(1, int(interval))
+
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Extract class token embedding."""
         return _extract_cls_token(self.encoder, x)
 
     def forward_detect(self, x: torch.Tensor) -> torch.Tensor:
-        """Detection forward pass.
+        """Detection forward pass with optional FP16 autocast.
 
         Args:
             x: Tensor (B, 3, H, W)
@@ -161,8 +170,12 @@ class DINOTracker(nn.Module):
         Returns:
             Tensor (B, num_classes, 5) with [conf, cx, cy, w, h] normalized
         """
-        feat = self.encode(x)
-        raw = self.detector_head(feat).view(x.size(0), len(TRACKED_CLASSES), 5)
+        use_amp = (self.device.type == "cuda")
+        with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
+            feat = self.encode(x)
+            raw = self.detector_head(feat).view(x.size(0), len(TRACKED_CLASSES), 5)
+        # Sigmoid in float32 to avoid precision loss in probability outputs
+        raw = raw.float()
         conf = torch.sigmoid(raw[..., :1])
         box = torch.sigmoid(raw[..., 1:])
         return torch.cat([conf, box], dim=-1)
@@ -234,13 +247,14 @@ class DINOTracker(nn.Module):
 
         return outputs
 
+    @torch.no_grad()
     def detect_yolo_compat(
         self,
         frame,
         timestamp: float = 0.0,
         min_confidence: float = MIN_CONFIDENCE,
     ) -> List[dict]:
-        """Detect player in frame, returning YOLO-compatible format.
+        """Detect player, returning YOLO-compatible format with optional interval caching.
 
         Returns a list of dicts with "id", "box", and "feet" keys for
         compatibility with player_context.py and other pipeline components.
@@ -254,45 +268,35 @@ class DINOTracker(nn.Module):
             [{"id": 0, "box": [x1, y1, x2, y2], "feet": (cx, y2), "feet_real": None}]
             or [] if no detection
         """
-        result = self.detect(frame, timestamp, min_confidence)
-        player_det = result.get("player")
+        run_inference = (self._detect_frame_count % self._detect_interval == 0)
+        self._detect_frame_count += 1
 
-        if player_det is None:
-            return []
+        if run_inference:
+            result = self.detect(frame, timestamp, min_confidence)
+            player_det = result.get("player")
 
-        ts, x, y, w, h = player_det
-        # Get frame dimensions for feet calculation
-        if isinstance(frame, np.ndarray):
-            orig_h, orig_w = frame.shape[:2]
-        elif isinstance(frame, torch.Tensor):
-            orig_h, orig_w = int(frame.shape[1]), int(frame.shape[2])
-        else:
-            orig_h, orig_w = 1080, 1920  # fallback
+            if player_det is None:
+                self._detect_cache = []
+            else:
+                ts, x, y, w, h = player_det
+                if isinstance(frame, np.ndarray):
+                    orig_h, orig_w = frame.shape[:2]
+                elif isinstance(frame, torch.Tensor):
+                    orig_h, orig_w = int(frame.shape[1]), int(frame.shape[2])
+                else:
+                    orig_h, orig_w = 1080, 1920
+                x1, y1 = x, y
+                x2, y2 = x + w, y + h
+                x1 = max(0.0, min(x1, orig_w - 1.0))
+                y1 = max(0.0, min(y1, orig_h - 1.0))
+                x2 = max(x1 + 1.0, min(x2, float(orig_w)))
+                y2 = max(y1 + 1.0, min(y2, float(orig_h)))
+                cx = (x1 + x2) / 2.0
+                self._detect_cache = [
+                    {"id": 0, "box": [x1, y1, x2, y2], "feet": (cx, y2), "feet_real": None}
+                ]
 
-        # Convert xywh to x1y1x2y2 format
-        x1 = x
-        y1 = y
-        x2 = x + w
-        y2 = y + h
-
-        # Clamp to frame bounds
-        x1 = max(0.0, min(x1, orig_w - 1.0))
-        y1 = max(0.0, min(y1, orig_h - 1.0))
-        x2 = max(x1 + 1.0, min(x2, orig_w))
-        y2 = max(y1 + 1.0, min(y2, orig_h))
-
-        # Feet: center x, bottom y
-        cx = (x1 + x2) / 2.0
-        feet = (cx, y2)
-
-        return [
-            {
-                "id": 0,  # DINOTracker detects single player
-                "box": [x1, y1, x2, y2],
-                "feet": feet,
-                "feet_real": None,  # filled later by CourtMapper
-            }
-        ]
+        return self._detect_cache
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -898,17 +902,17 @@ def _create_vit_tiny(pretrained_weights_path: Optional[str] = None) -> Tuple[nn.
     except ImportError:
         raise ImportError("Install timm: pip install timm")
 
-    dinov2_model = os.environ.get("DINOV2_MODEL", "dinov2_vitb14")
+    dinov2_model = os.environ.get("DINOV2_MODEL", "dinov2_vits14")
     try:
         print(f"[DINOTracker] Loading DINOv2: {dinov2_model}")
         encoder = torch.hub.load("facebookresearch/dinov2", dinov2_model)
-        embed_dim = getattr(encoder, "embed_dim", None) or getattr(encoder, "num_features", None) or 768
+        embed_dim = getattr(encoder, "embed_dim", None) or getattr(encoder, "num_features", None) or 384
         print(f"[DINOTracker] Loaded DINOv2 (embed_dim={embed_dim})")
         return encoder, int(embed_dim)
     except Exception as e:
-        print(f"[DINOTracker] DINOv2 load failed ({e}), using timm ViT-tiny")
-        encoder = timm.create_model("vit_tiny_patch16_224", pretrained=True, num_classes=0, dynamic_img_size=True)
-        embed_dim = getattr(encoder, "embed_dim", 192)
+        print(f"[DINOTracker] DINOv2 load failed ({e}), using timm ViT-small")
+        encoder = timm.create_model("vit_small_patch16_224", pretrained=True, num_classes=0, dynamic_img_size=True)
+        embed_dim = getattr(encoder, "embed_dim", 384)
         return encoder, int(embed_dim)
 
 
@@ -922,7 +926,13 @@ def _create_vit_by_embed_dim(embed_dim: int, pretrained_weights_path: Optional[s
     if embed_dim == 192:
         model_name = "vit_tiny_patch16_224"
     elif embed_dim == 384:
-        model_name = "vit_small_patch16_224"
+        try:
+            print("[DINOTracker] Loading DINOv2 ViT-S/14")
+            encoder = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14")
+            ed = getattr(encoder, "embed_dim", None) or 384
+            return encoder, int(ed)
+        except Exception:
+            model_name = "vit_small_patch16_224"
     elif embed_dim == 768:
         try:
             print("[DINOTracker] Loading DINOv2 ViT-B/14")

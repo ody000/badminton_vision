@@ -12,16 +12,22 @@ mog2_var_threshold: 200
 mog2_history: 1000
 
 # ─── TrackNet ────────────────────────────────────────────────────────────────
+tracknet_version: 3                          # 2 = original UNet, 3 = V3 with background
 tracknet_buffer_size: 3
 tracknet_box_size: 16
 tracknet_expected_h: 288
 tracknet_expected_w: 512
-tracknet_conf_threshold: 0.15        # increased to reject noisy/false detections; stabilize tracking
+tracknet_conf_threshold: 0.5                 # V3 uses higher sigmoid output scale than V2 (0.15 for V2)
 tracknet_weights: models/tracknet.pt
 # Batch N frames into one GPU forward pass for ~3–5× higher throughput.
 # 8 is the standard default (SageMaker/Triton Inference Server) and fits
 # any OSCAR GPU at 9×288×512×float32 input size.
 tracknet_batch_size: 8
+# TrackNetV3-specific configuration
+tracknetv3_weights: models/tracknetv3_tracknet.pt
+inpaintnet_weights: models/tracknetv3_inpaintnet.pt
+tracknetv3_use_inpaintnet: true
+tracknet_bg_frames: 150                      # frames sampled for background median (5s at 30fps)
 
 # ─── Hit detection ───────────────────────────────────────────────────────────
 hit_trajectory_n: 6               # positions for quadratic fit (pre+post)
@@ -45,9 +51,7 @@ rally_min_hits: 0                 # was 1 — hit detection is separate; don't g
 # ─── Player tracking ─────────────────────────────────────────────────────────
 player_conf_threshold: 0.25
 player_weights: models/dino_player.pt      # DINOv3 player detector (fine-tuned on custom data)
-# Note: DINOv3 runs at 2-3ms per frame (no caching needed, unlike YOLOv8).
-# player_detect_interval kept for legacy compatibility but not used with DINO.
-player_detect_interval: 1
+player_detect_interval: 3                  # run DINO every 3rd frame (Phase 1-B interval caching)
 
 # ─── Court ───────────────────────────────────────────────────────────────────
 court_real_width_cm: 610.0

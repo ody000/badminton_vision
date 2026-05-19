@@ -32,7 +32,7 @@ class TrackNetTracker:
         self,
         cfg=None,
         weights_path: str | None = None,
-        device: str = "cpu",
+        device: str | None = None,
         box_size: int = 16,
         conf_threshold: float = 0.001,
         expected_h: int = 288,
@@ -48,6 +48,8 @@ class TrackNetTracker:
             expected_h = int(getattr(cfg, "tracknet_expected_h", expected_h))
             expected_w = int(getattr(cfg, "tracknet_expected_w", expected_w))
             fps = float(getattr(cfg, "fps", fps))
+        else:
+            device = device or "cpu"
 
         self.device = torch.device(
             device if isinstance(device, str) else ("cuda" if torch.cuda.is_available() else "cpu")
