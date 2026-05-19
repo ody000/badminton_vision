@@ -43,14 +43,11 @@ rally_detection_grace_frames: 8   # was 5 — bridge more TrackNet miss frames
 rally_min_hits: 0                 # was 1 — hit detection is separate; don't gate rallies on it
 
 # ─── Player tracking ─────────────────────────────────────────────────────────
-player_conf_threshold: 0.5
-player_bytetrack_history: 1000
-player_weights: models/yolo.pt             # fine-tuned; falls back to yolov8n.pt
-# Run YOLO every N frames; return cached detections in between.
-# ByteTrack's Kalman state persists across the gap (persist=True).
-# N=3 → ~67% fewer YOLO calls; safe for badminton where players move
-# ~5–15 cm/frame at court scale.  Set to 1 to disable interval gating.
-player_detect_interval: 3
+player_conf_threshold: 0.25
+player_weights: models/dino_player.pt      # DINOv3 player detector (fine-tuned on custom data)
+# Note: DINOv3 runs at 2-3ms per frame (no caching needed, unlike YOLOv8).
+# player_detect_interval kept for legacy compatibility but not used with DINO.
+player_detect_interval: 1
 
 # ─── Court ───────────────────────────────────────────────────────────────────
 court_real_width_cm: 610.0

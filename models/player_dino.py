@@ -951,3 +951,10 @@ def apply_lora_to_encoder(encoder: nn.Module, r: int = 4, alpha: int = 16, min_d
         replaced += 1
 
     return replaced
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API Alias for backward compatibility with main.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+PlayerDetector = DINOTracker  # main.py imports PlayerDetector; alias to DINOTracker
