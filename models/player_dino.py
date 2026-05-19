@@ -162,7 +162,7 @@ class DINOTracker(nn.Module):
         return _extract_cls_token(self.encoder, x)
 
     def forward_detect(self, x: torch.Tensor) -> torch.Tensor:
-        """Detection forward pass with optional FP16 autocast.
+        """Detection forward pass with optional FP16 autocast (inference only).
 
         Args:
             x: Tensor (B, 3, H, W)
@@ -170,12 +170,13 @@ class DINOTracker(nn.Module):
         Returns:
             Tensor (B, num_classes, 5) with [conf, cx, cy, w, h] normalized
         """
-        use_amp = (self.device.type == "cuda")
+        # FP16 only during inference (self.training == False). Training uses full precision for numerical stability.
+        use_amp = (self.device.type == "cuda") and (not self.training)
         with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
             feat = self.encode(x)
             raw = self.detector_head(feat).view(x.size(0), len(TRACKED_CLASSES), 5)
         # Sigmoid in float32 to avoid precision loss in probability outputs
-        raw = raw.float()
+        raw = raw.float() if not use_amp else raw
         conf = torch.sigmoid(raw[..., :1])
         box = torch.sigmoid(raw[..., 1:])
         return torch.cat([conf, box], dim=-1)
