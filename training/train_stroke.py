@@ -127,13 +127,20 @@ def _load_finebadminton_hf(data_dir: str, split: str, cfg):
             print(f"[TRAIN_STROKE] Warning: Could not load {json_file}: {e}")
             continue
 
-        # Handle different JSON structures (may have "hits", "events", "rallies", etc.)
-        hits = (
-            video_data.get("hits") or
-            video_data.get("events") or
-            video_data.get("rallies") or
-            []
-        )
+        # Handle different JSON structures
+        # Case 1: Direct list of hits
+        if isinstance(video_data, list):
+            hits = video_data
+        # Case 2: Dict with "hits", "events", "rallies" keys
+        elif isinstance(video_data, dict):
+            hits = (
+                video_data.get("hits") or
+                video_data.get("events") or
+                video_data.get("rallies") or
+                []
+            )
+        else:
+            hits = []
 
         for hit_idx, hit in enumerate(hits):
             # Extract stroke label (try multiple naming conventions)
