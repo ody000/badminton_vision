@@ -1,7 +1,8 @@
 #!/bin/bash
-# SLURM launcher for badminton_vision training and inference.
+# SLURM launcher for badminton_vision training.
 #
-# Modes: train-tracknet | train-yolo | train-stroke | train-dino | run-main
+# Modes: train-tracknet | train-yolo | train-stroke | train-dino
+# For inference, use slurm_track.sh instead.
 #
 # Brown OSCAR GPU partitions:
 #   gpu          — general GPU pool (V100/A100, up to 2 GPUs per job)
@@ -26,9 +27,6 @@
 #
 #   # 1 GPU (faster queue time for stroke classifier)
 #   sbatch -p gpu --gres=gpu:1 --export=MODE=train-stroke,NGPUS=1,FINEBADMINTON_DIR=/oscar/scratch/$USER/finebadminton20k slurm_train.sh
-#
-#   # Inference only (no GPU needed beyond 1)
-#   sbatch -p gpu --gres=gpu:1 --export=MODE=run-main,VIDEO_PATH=data/input/match_clip.mp4 slurm_train.sh
 #
 # NOTE: #SBATCH directives are parsed as literal text — shell variables do NOT
 # expand inside them.  Override --partition and --gres on the sbatch command
@@ -268,19 +266,10 @@ print(f"[TRAIN] Checkpoint saved to: {os.path.join(output_dir, checkpoint_name)}
 ENDPYTHON
         ;;
 
-    run-main)
-        echo "[SLURM] Running main pipeline"
-        ${PYTHON_CMD} main.py \
-            --config config.yaml \
-            --video "${VIDEO_PATH}" \
-            --court-points "${COURT_POINTS}" \
-            --output-dir "${OUTPUT_DIR}" \
-            --device "${DEVICE}"
-        ;;
-
     *)
         echo "[SLURM] ERROR: Unknown MODE '${MODE}'"
-        echo "  Valid modes: train-tracknet | train-yolo | train-stroke | train-dino | run-main"
+        echo "  Valid modes: train-tracknet | train-yolo | train-stroke | train-dino"
+        echo "  For inference, use slurm_track.sh instead."
         exit 1
         ;;
 esac
