@@ -27,6 +27,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -98,6 +99,9 @@ def run(
         device=device,
         input_size=getattr(cfg, "player_input_size", 384),
     )
+    print(f"[MAIN] CUDA diagnostic: torch.cuda.is_available()={torch.cuda.is_available()}, yolo.encoder.device={next(yolo.encoder.parameters()).device}")
+    tracknet_device = tracknet.model.device if hasattr(tracknet.model, "device") else next(tracknet.model.parameters()).device
+    print(f"[MAIN] TrackNet device: {tracknet_device}")
 
     court_mapper = CourtMapper(cfg)
     court_points_file = getattr(cfg, "court_points_file", "data/input/court_points.json")
@@ -149,7 +153,13 @@ def run(
         shuttle: Shuttle | None = Shuttle.from_tuple(shuttle_tuple) if shuttle_tuple else None
 
         # 2. Player detection + real-world transform + history accumulation
+        torch.cuda.synchronize()  # Ensure GPU is idle before timing
+        t_dino_start = time.time()
         raw_players = yolo.detect_yolo_compat(frame_bgr)
+        torch.cuda.synchronize()  # Wait for GPU computation to finish
+        t_dino_end = time.time()
+        if len(raw_players) > 0:
+            print(f"[MAIN] DINO detection: {(t_dino_end - t_dino_start)*1000:.2f}ms GPU-accurate time")
         players = player_ctx.update(raw_players, court_mapper)
 
         # 3. Hit detection
