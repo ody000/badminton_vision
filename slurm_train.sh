@@ -26,9 +26,15 @@
 #   # 2 GPUs, default partition (TrackNet)
 #   sbatch --export=MODE=train-tracknet slurm_train.sh
 #
-#   # Stroke classifier (multi-frame, Phase 4-E) — 1 GPU, ~30 minutes
+#   # Stroke classifier (multi-frame, Phase 4-E, FineBadminton20k) — 1 GPU, ~2-3 hours
+#   # Uses per-video JSON format from finebadminton-20K/*.json with 20k+ hits
+#   sbatch -p gpu --gres=gpu:1 --mem=48G \
+#     --export=MODE=train-stroke,NGPUS=1,EPOCHS=100,BATCH_SIZE=16,LR=3e-4,FINEBADMINTON_DIR=/users/$USER/scratch/finebadminton20k \
+#     slurm_train.sh
+#
+#   # Stroke classifier with LoRA fine-tuning (if you had pretrained weights)
 #   sbatch -p gpu --gres=gpu:1 --mem=32G \
-#     --export=MODE=train-stroke,NGPUS=1,EPOCHS=30,BATCH_SIZE=8,LR=3e-4,FINEBADMINTON_DIR=/users/$USER/scratch/finebadminton20k \
+#     --export=MODE=train-stroke,NGPUS=1,EPOCHS=30,BATCH_SIZE=16,LR=3e-4,FINEBADMINTON_DIR=/users/$USER/scratch/finebadminton20k \
 #     slurm_train.sh
 #
 # NOTE: #SBATCH directives are parsed as literal text — shell variables do NOT

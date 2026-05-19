@@ -230,15 +230,90 @@ python slayminton/main.py \
 
 ---
 
-## Stroke Classification
+## Stroke Classification (Phase 4: Multi-Frame)
 
-**Status**: ✅ Production
+**Status**: ✅ Production (Multi-frame temporal sequences)
 
-**Model**: ResNet-based stroke classifier
-- **Weights**: `models/stroke.pt`
-- **Classes**: Serve, Clear, Drop, Smash, Push, Lob, Drive
-- **Input**: Cropped frame around player (RGB)
-- **Output**: Stroke class + confidence
+**Model**: StrokeTransformer (Transformer encoder + 3-head classification)
+- **Weights**: `models/stroke.pt` (auto-saved on best F1 during training)
+- **Architecture**: Transformer encoder processes temporal pose sequences
+- **Input**: Multi-frame pose sequences (T=7 frames: 3 before + keyframe + 3 after)
+  - Pose features: 33 MediaPipe keypoints × 3 (x, y, visibility) = 99 dims
+  - Trajectory features: 6 pre-hit + 6 post-hit positions × 2 coords = 24 dims
+  - Total per frame: 123 dims, stacked across T frames = (1, T, 123) tensor
+- **Output**: 
+  - Foundational action (8 classes): clear, drop, smash, net, drive, lift, lob, serve
+  - Tactical semantic (6 classes): attack, defense, neutral_tactic, setup, exploit, unclear
+  - Decision evaluation (3 classes): good, neutral, poor
+- **Dataset**: FineBadminton20k (20,757 annotated hits from 70 videos, 2,066 rallies)
+
+### Training on FineBadminton20k
+
+The dataset loader (`training/train_stroke.py`) auto-detects three formats:
+1. **finebadminton-hf** — Per-video JSONs in `finebadminton-20K/*.json` (FineBadminton20k format)
+2. **huggingface** — Standard HuggingFace datasets (.parquet/.arrow)
+3. **json** — Custom JSON with `annotations.json` at root
+
+#### Commands
+
+**Full training (100 epochs, recommended for scratch training):**
+```bash
+sbatch -p gpu --gres=gpu:1 --mem=48G \
+  --export=MODE=train-stroke,NGPUS=1,EPOCHS=100,BATCH_SIZE=16,LR=3e-4,FINEBADMINTON_DIR=/users/$USER/scratch/finebadminton20k \
+  slurm_train.sh
+```
+Expected runtime: 2-3 hours on A100 GPU
+
+**Quick validation (30 epochs):**
+```bash
+sbatch -p gpu --gres=gpu:1 --mem=48G \
+  --export=MODE=train-stroke,NGPUS=1,EPOCHS=30,BATCH_SIZE=16,LR=3e-4,FINEBADMINTON_DIR=/users/$USER/scratch/finebadminton20k \
+  slurm_train.sh
+```
+
+**Large batch (80GB GPU only):**
+```bash
+sbatch -p gpu-he --gres=gpu:1 --mem=80G \
+  --export=MODE=train-stroke,NGPUS=1,EPOCHS=100,BATCH_SIZE=32,LR=1e-3,FINEBADMINTON_DIR=/users/$USER/scratch/finebadminton20k \
+  slurm_train.sh
+```
+
+#### Data Structure
+```
+/users/$USER/scratch/finebadminton20k/
+├── finebadminton-20K/          # Per-video JSON annotations
+│   ├── 0001_updated.json       # Video 1: hit events with labels
+│   ├── 0002_updated.json       # Video 2: hit events with labels
+│   └── ... (70 videos)
+├── videos/                     # Video files (optional for feature extraction)
+│   ├── 0001.mp4
+│   ├── 0002.mp4
+│   └── ...
+└── annotations.json            # Optional root-level metadata
+```
+
+Each JSON contains hit events with fields:
+- `foundational_action` — Stroke label (clear, drop, smash, etc.)
+- `tactical_semantic` — Tactical context
+- `decision_eval` — Quality assessment
+
+#### Monitoring
+
+```bash
+# View job status
+squeue --user=$USER
+
+# Tail logs (replace JOB_ID from squeue)
+tail -f data/output/logs/slurm-JOB_ID.out
+```
+
+Best checkpoint is saved automatically to `models/stroke.pt` when validation F1 improves.
+
+#### Known Limitations
+
+- **Features**: Currently zero-filled; on-the-fly pose extraction from videos not yet implemented
+- **Temporal alignment**: Requires hit timestamps and surrounding frame indices from video
+- **Training speed**: Loads per-video JSONs without pre-extracted features (~1K samples/epoch)
 
 ---
 

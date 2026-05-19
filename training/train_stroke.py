@@ -55,14 +55,24 @@ DECISION_TO_IDX = {d: i for i, d in enumerate(DECISION_LABELS)}
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _detect_format(data_dir: str) -> str:
-    """Return 'huggingface' or 'json'.
+    """Return 'finebadminton-hf' (per-video JSONs), 'huggingface', or 'json'.
 
+    FineBadminton20k uses per-video JSON annotations in finebadminton-20K/*.json.
     HuggingFace datasets.save_to_disk() always writes dataset_info.json.
     Arrow / parquet files are also a reliable signal.
     """
     if not os.path.isdir(data_dir):
         return "json"
     contents = os.listdir(data_dir)
+
+    # Check for FineBadminton20k per-video format (finebadminton-20K/*.json)
+    finebadminton_subdir = os.path.join(data_dir, "finebadminton-20K")
+    if os.path.isdir(finebadminton_subdir):
+        json_files = [f for f in os.listdir(finebadminton_subdir) if f.endswith(".json")]
+        if json_files:
+            return "finebadminton-hf"
+
+    # Standard HuggingFace signals
     hf_signals = {"dataset_info.json", "state.json"}
     if hf_signals & set(contents):
         return "huggingface"
@@ -78,6 +88,110 @@ def _detect_format(data_dir: str) -> str:
             if any(f.endswith(".parquet") or f.endswith(".arrow") for f in sub_contents):
                 return "huggingface"
     return "json"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FineBadminton20k per-video JSON format loader
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_finebadminton_hf(data_dir: str, split: str, cfg):
+    """Load FineBadminton20k from per-video JSON format (finebadminton-20K/*.json).
+
+    Structure:
+      data_dir/finebadminton-20K/*.json (per-video annotations)
+      data_dir/videos/*.mp4 (video files, optional for feature extraction)
+      data_dir/annotations.json (optional, root-level annotations)
+
+    Each per-video JSON contains hit events with stroke labels.
+    """
+    finebadminton_subdir = os.path.join(data_dir, "finebadminton-20K")
+    json_files = sorted([
+        f for f in os.listdir(finebadminton_subdir)
+        if f.endswith(".json")
+    ])
+
+    feature_dim = (
+        int(getattr(cfg, "stroke_pose_joints", 33)) * 3
+        + int(getattr(cfg, "stroke_trajectory_n", 6)) * 2 * 2
+    )
+
+    samples = []
+    skipped = 0
+
+    for json_file in json_files:
+        json_path = os.path.join(finebadminton_subdir, json_file)
+        try:
+            with open(json_path, "r") as f:
+                video_data = json.load(f)
+        except Exception as e:
+            print(f"[TRAIN_STROKE] Warning: Could not load {json_file}: {e}")
+            continue
+
+        # Handle different JSON structures (may have "hits", "events", "rallies", etc.)
+        hits = (
+            video_data.get("hits") or
+            video_data.get("events") or
+            video_data.get("rallies") or
+            []
+        )
+
+        for hit_idx, hit in enumerate(hits):
+            # Extract stroke label (try multiple naming conventions)
+            raw_label = (
+                hit.get("foundational_action") or
+                hit.get("stroke_type") or
+                hit.get("action") or
+                None
+            )
+
+            if raw_label is None:
+                skipped += 1
+                continue
+
+            # Convert to index
+            if isinstance(raw_label, int):
+                label_idx = raw_label if raw_label < len(FOUNDATIONAL_ACTIONS) else -1
+            else:
+                label_idx = ACTION_TO_IDX.get(str(raw_label).lower().strip(), -1)
+
+            if label_idx < 0:
+                skipped += 1
+                continue
+
+            # Extract auxiliary labels
+            ta_raw = hit.get("tactical_semantic") or hit.get("tactic")
+            ta_idx = (TACTICAL_TO_IDX.get(str(ta_raw).lower().strip(), -1)
+                     if isinstance(ta_raw, str) else
+                     (ta_raw if isinstance(ta_raw, int) and ta_raw < len(TACTICAL_LABELS) else -1))
+
+            de_raw = hit.get("decision_eval") or hit.get("decision")
+            de_idx = (DECISION_TO_IDX.get(str(de_raw).lower().strip(), -1)
+                     if isinstance(de_raw, str) else
+                     (de_raw if isinstance(de_raw, int) and de_raw < len(DECISION_LABELS) else -1))
+
+            # Store hit metadata for optional feature extraction
+            # For now, use zero-filled features (features will be None)
+            samples.append({
+                "features":      None,  # Will be filled with zeros in __getitem__
+                "label":         label_idx,
+                "tactical":      ta_idx,
+                "decision":      de_idx,
+                "video_file":    json_file.replace(".json", ".mp4"),
+                "hit_index":     hit_idx,
+                "hit_data":      hit,  # Store full hit data for later feature extraction
+            })
+
+    if skipped:
+        print(f"[TRAIN_STROKE] Skipped {skipped} hits with missing/invalid labels.")
+
+    print(f"[TRAIN_STROKE] Loaded {len(samples)} hits from {len(json_files)} video JSONs")
+
+    # Split into train/val
+    n = len(samples)
+    cutoff = int(n * 0.8)
+    split_samples = samples[:cutoff] if split == "train" else samples[cutoff:]
+
+    return split_samples, feature_dim
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -206,7 +320,9 @@ class FineBadmintonDataset(Dataset):
             + int(getattr(cfg, "stroke_trajectory_n", 6)) * 2 * 2
         )
 
-        if fmt == "huggingface":
+        if fmt == "finebadminton-hf":
+            self.samples, self.feature_dim = _load_finebadminton_hf(data_dir, split, cfg)
+        elif fmt == "huggingface":
             self.samples, self.feature_dim = _load_hf_dataset(data_dir, split, cfg)
         else:
             self.samples = self._load_json(data_dir, split, cfg)
