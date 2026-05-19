@@ -55,9 +55,9 @@ DECISION_TO_IDX = {d: i for i, d in enumerate(DECISION_LABELS)}
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _detect_format(data_dir: str) -> str:
-    """Return 'finebadminton-hf' (per-video JSONs), 'huggingface', or 'json'.
+    """Return 'finebadminton-hf' (with root annotations.json), 'huggingface', or 'json'.
 
-    FineBadminton20k uses per-video JSON annotations in finebadminton-20K/*.json.
+    FineBadminton20k uses root-level annotations.json with all hit annotations.
     HuggingFace datasets.save_to_disk() always writes dataset_info.json.
     Arrow / parquet files are also a reliable signal.
     """
@@ -65,12 +65,9 @@ def _detect_format(data_dir: str) -> str:
         return "json"
     contents = os.listdir(data_dir)
 
-    # Check for FineBadminton20k per-video format (finebadminton-20K/*.json)
-    finebadminton_subdir = os.path.join(data_dir, "finebadminton-20K")
-    if os.path.isdir(finebadminton_subdir):
-        json_files = [f for f in os.listdir(finebadminton_subdir) if f.endswith(".json")]
-        if json_files:
-            return "finebadminton-hf"
+    # Check for FineBadminton20k with root annotations.json + finebadminton-20K/ subdirectory
+    if "annotations.json" in contents and "finebadminton-20K" in contents:
+        return "finebadminton-hf"
 
     # Standard HuggingFace signals
     hf_signals = {"dataset_info.json", "state.json"}
@@ -95,137 +92,122 @@ def _detect_format(data_dir: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_finebadminton_hf(data_dir: str, split: str, cfg):
-    """Load FineBadminton20k from per-video JSON format (finebadminton-20K/*.json).
+    """Load FineBadminton20k from root annotations.json (HuggingFace format).
 
     Structure:
-      data_dir/finebadminton-20K/*.json (per-video annotations)
+      data_dir/annotations.json (root-level HuggingFace annotations with all hits)
+      data_dir/finebadminton-20K/*.json (per-video metadata, not used for training)
       data_dir/videos/*.mp4 (video files, optional for feature extraction)
-      data_dir/annotations.json (optional, root-level annotations)
-
-    Each per-video JSON contains hit events with stroke labels.
     """
-    print(f"[TRAIN_STROKE] Checking data directory: {data_dir}")
-    print(f"[TRAIN_STROKE] Directory exists: {os.path.isdir(data_dir)}")
-    if os.path.isdir(data_dir):
-        print(f"[TRAIN_STROKE] Contents: {os.listdir(data_dir)}")
+    ann_path = os.path.join(data_dir, "annotations.json")
 
-    finebadminton_subdir = os.path.join(data_dir, "finebadminton-20K")
-
-    if not os.path.isdir(finebadminton_subdir):
+    if not os.path.exists(ann_path):
         raise FileNotFoundError(
-            f"[TRAIN_STROKE] finebadminton-20K directory not found at {finebadminton_subdir}\n"
-            f"Please ensure FINEBADMINTON_DIR points to the root directory containing finebadminton-20K/ subdirectory."
+            f"[TRAIN_STROKE] annotations.json not found at {ann_path}\n"
+            f"FineBadminton20k must include a root-level annotations.json file (HuggingFace format)."
         )
 
-    json_files = sorted([
-        f for f in os.listdir(finebadminton_subdir)
-        if f.endswith(".json")
-    ])
-
-    if not json_files:
-        raise ValueError(
-            f"[TRAIN_STROKE] No .json files found in {finebadminton_subdir}\n"
-            f"Please verify the dataset path contains *.json annotation files."
-        )
-
-    print(f"[TRAIN_STROKE] Found {len(json_files)} JSON files in finebadminton-20K/")
+    print(f"[TRAIN_STROKE] Loading HuggingFace format from {ann_path}")
 
     feature_dim = (
         int(getattr(cfg, "stroke_pose_joints", 33)) * 3
         + int(getattr(cfg, "stroke_trajectory_n", 6)) * 2 * 2
     )
 
+    try:
+        with open(ann_path, "r") as f:
+            ann_data = json.load(f)
+    except Exception as e:
+        raise ValueError(f"[TRAIN_STROKE] Failed to load {ann_path}: {e}")
+
+    # Handle different annotation structures
+    # Case 1: Direct list of hits
+    if isinstance(ann_data, list):
+        hits = ann_data
+    # Case 2: Dict with "hits", "events", "annotations" keys
+    elif isinstance(ann_data, dict):
+        hits = (
+            ann_data.get("hits") or
+            ann_data.get("events") or
+            ann_data.get("annotations") or
+            ann_data.get("data") or
+            []
+        )
+    else:
+        hits = []
+
+    print(f"[TRAIN_STROKE] Total hits in annotations: {len(hits)}")
+
     samples = []
     skipped = 0
-    total_hits_loaded = 0
+    skipped_reasons = {}
 
-    for json_file in json_files:
-        json_path = os.path.join(finebadminton_subdir, json_file)
-        try:
-            with open(json_path, "r") as f:
-                video_data = json.load(f)
-        except Exception as e:
-            print(f"[TRAIN_STROKE] Warning: Could not load {json_file}: {e}")
+    for hit_idx, hit in enumerate(hits):
+        if not isinstance(hit, dict):
+            skipped += 1
+            skipped_reasons["not_dict"] = skipped_reasons.get("not_dict", 0) + 1
             continue
 
-        # Handle different JSON structures
-        # Case 1: Direct list of hits
-        if isinstance(video_data, list):
-            hits = video_data
-        # Case 2: Dict with "hits", "events", "rallies" keys
-        elif isinstance(video_data, dict):
-            hits = (
-                video_data.get("hits") or
-                video_data.get("events") or
-                video_data.get("rallies") or
-                []
-            )
+        # Extract stroke label (try multiple naming conventions)
+        raw_label = (
+            hit.get("foundational_action") or
+            hit.get("stroke_type") or
+            hit.get("action") or
+            None
+        )
+
+        if raw_label is None:
+            skipped += 1
+            skipped_reasons["no_label"] = skipped_reasons.get("no_label", 0) + 1
+            # Print diagnostic on first hit to help debug
+            if hit_idx == 0:
+                print(f"[TRAIN_STROKE] Warning: Hit has no label field. Available keys: {list(hit.keys())}")
+            continue
+
+        # Convert to index
+        if isinstance(raw_label, int):
+            label_idx = raw_label if raw_label < len(FOUNDATIONAL_ACTIONS) else -1
         else:
-            hits = []
+            label_idx = ACTION_TO_IDX.get(str(raw_label).lower().strip(), -1)
 
-        for hit_idx, hit in enumerate(hits):
-            total_hits_loaded += 1
+        if label_idx < 0:
+            skipped += 1
+            skipped_reasons["invalid_label"] = skipped_reasons.get("invalid_label", 0) + 1
+            continue
 
-            # Extract stroke label (try multiple naming conventions)
-            raw_label = (
-                hit.get("foundational_action") or
-                hit.get("stroke_type") or
-                hit.get("action") or
-                None
-            )
+        # Extract auxiliary labels
+        ta_raw = hit.get("tactical_semantic") or hit.get("tactic")
+        ta_idx = (TACTICAL_TO_IDX.get(str(ta_raw).lower().strip(), -1)
+                 if isinstance(ta_raw, str) else
+                 (ta_raw if isinstance(ta_raw, int) and ta_raw < len(TACTICAL_LABELS) else -1))
 
-            if raw_label is None:
-                skipped += 1
-                # Print diagnostic on first file to help debug
-                if json_file == json_files[0] and hit_idx == 0:
-                    print(f"[TRAIN_STROKE] Warning: Hit has no label field. Available keys: {list(hit.keys())}")
-                continue
+        de_raw = hit.get("decision_eval") or hit.get("decision")
+        de_idx = (DECISION_TO_IDX.get(str(de_raw).lower().strip(), -1)
+                 if isinstance(de_raw, str) else
+                 (de_raw if isinstance(de_raw, int) and de_raw < len(DECISION_LABELS) else -1))
 
-            # Convert to index
-            if isinstance(raw_label, int):
-                label_idx = raw_label if raw_label < len(FOUNDATIONAL_ACTIONS) else -1
-            else:
-                label_idx = ACTION_TO_IDX.get(str(raw_label).lower().strip(), -1)
-
-            if label_idx < 0:
-                skipped += 1
-                continue
-
-            # Extract auxiliary labels
-            ta_raw = hit.get("tactical_semantic") or hit.get("tactic")
-            ta_idx = (TACTICAL_TO_IDX.get(str(ta_raw).lower().strip(), -1)
-                     if isinstance(ta_raw, str) else
-                     (ta_raw if isinstance(ta_raw, int) and ta_raw < len(TACTICAL_LABELS) else -1))
-
-            de_raw = hit.get("decision_eval") or hit.get("decision")
-            de_idx = (DECISION_TO_IDX.get(str(de_raw).lower().strip(), -1)
-                     if isinstance(de_raw, str) else
-                     (de_raw if isinstance(de_raw, int) and de_raw < len(DECISION_LABELS) else -1))
-
-            # Store hit metadata for optional feature extraction
-            # For now, use zero-filled features (features will be None)
-            samples.append({
-                "features":      None,  # Will be filled with zeros in __getitem__
-                "label":         label_idx,
-                "tactical":      ta_idx,
-                "decision":      de_idx,
-                "video_file":    json_file.replace(".json", ".mp4"),
-                "hit_index":     hit_idx,
-                "hit_data":      hit,  # Store full hit data for later feature extraction
-            })
+        # Store hit metadata
+        samples.append({
+            "features":      hit.get("features"),  # May be pre-extracted features
+            "label":         label_idx,
+            "tactical":      ta_idx,
+            "decision":      de_idx,
+            "hit_data":      hit,
+        })
 
     print(
         f"[TRAIN_STROKE] Dataset summary:\n"
-        f"  Total hits loaded: {total_hits_loaded}\n"
+        f"  Total hits: {len(hits)}\n"
         f"  Valid samples: {len(samples)}\n"
-        f"  Skipped (invalid labels): {skipped}\n"
-        f"  Video JSONs processed: {len(json_files)}"
+        f"  Skipped: {skipped} {skipped_reasons}"
     )
 
     if len(samples) == 0:
         raise ValueError(
-            f"[TRAIN_STROKE] No valid samples loaded! Check that JSON files contain valid label fields.\n"
-            f"Expected one of: foundational_action, stroke_type, action"
+            f"[TRAIN_STROKE] No valid samples loaded! annotations.json must contain hits with:\n"
+            f"  - foundational_action / stroke_type / action (required label)\n"
+            f"  - tactical_semantic / tactic (optional)\n"
+            f"  - decision_eval / decision (optional)"
         )
 
     # Split into train/val
