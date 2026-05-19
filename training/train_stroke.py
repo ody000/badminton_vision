@@ -104,11 +104,31 @@ def _load_finebadminton_hf(data_dir: str, split: str, cfg):
 
     Each per-video JSON contains hit events with stroke labels.
     """
+    print(f"[TRAIN_STROKE] Checking data directory: {data_dir}")
+    print(f"[TRAIN_STROKE] Directory exists: {os.path.isdir(data_dir)}")
+    if os.path.isdir(data_dir):
+        print(f"[TRAIN_STROKE] Contents: {os.listdir(data_dir)}")
+
     finebadminton_subdir = os.path.join(data_dir, "finebadminton-20K")
+
+    if not os.path.isdir(finebadminton_subdir):
+        raise FileNotFoundError(
+            f"[TRAIN_STROKE] finebadminton-20K directory not found at {finebadminton_subdir}\n"
+            f"Please ensure FINEBADMINTON_DIR points to the root directory containing finebadminton-20K/ subdirectory."
+        )
+
     json_files = sorted([
         f for f in os.listdir(finebadminton_subdir)
         if f.endswith(".json")
     ])
+
+    if not json_files:
+        raise ValueError(
+            f"[TRAIN_STROKE] No .json files found in {finebadminton_subdir}\n"
+            f"Please verify the dataset path contains *.json annotation files."
+        )
+
+    print(f"[TRAIN_STROKE] Found {len(json_files)} JSON files in finebadminton-20K/")
 
     feature_dim = (
         int(getattr(cfg, "stroke_pose_joints", 33)) * 3
@@ -117,6 +137,7 @@ def _load_finebadminton_hf(data_dir: str, split: str, cfg):
 
     samples = []
     skipped = 0
+    total_hits_loaded = 0
 
     for json_file in json_files:
         json_path = os.path.join(finebadminton_subdir, json_file)
@@ -143,6 +164,8 @@ def _load_finebadminton_hf(data_dir: str, split: str, cfg):
             hits = []
 
         for hit_idx, hit in enumerate(hits):
+            total_hits_loaded += 1
+
             # Extract stroke label (try multiple naming conventions)
             raw_label = (
                 hit.get("foundational_action") or
@@ -153,6 +176,9 @@ def _load_finebadminton_hf(data_dir: str, split: str, cfg):
 
             if raw_label is None:
                 skipped += 1
+                # Print diagnostic on first file to help debug
+                if json_file == json_files[0] and hit_idx == 0:
+                    print(f"[TRAIN_STROKE] Warning: Hit has no label field. Available keys: {list(hit.keys())}")
                 continue
 
             # Convert to index
@@ -188,15 +214,26 @@ def _load_finebadminton_hf(data_dir: str, split: str, cfg):
                 "hit_data":      hit,  # Store full hit data for later feature extraction
             })
 
-    if skipped:
-        print(f"[TRAIN_STROKE] Skipped {skipped} hits with missing/invalid labels.")
+    print(
+        f"[TRAIN_STROKE] Dataset summary:\n"
+        f"  Total hits loaded: {total_hits_loaded}\n"
+        f"  Valid samples: {len(samples)}\n"
+        f"  Skipped (invalid labels): {skipped}\n"
+        f"  Video JSONs processed: {len(json_files)}"
+    )
 
-    print(f"[TRAIN_STROKE] Loaded {len(samples)} hits from {len(json_files)} video JSONs")
+    if len(samples) == 0:
+        raise ValueError(
+            f"[TRAIN_STROKE] No valid samples loaded! Check that JSON files contain valid label fields.\n"
+            f"Expected one of: foundational_action, stroke_type, action"
+        )
 
     # Split into train/val
     n = len(samples)
     cutoff = int(n * 0.8)
     split_samples = samples[:cutoff] if split == "train" else samples[cutoff:]
+
+    print(f"[TRAIN_STROKE] Split '{split}': {len(split_samples)} samples")
 
     return split_samples, feature_dim
 
