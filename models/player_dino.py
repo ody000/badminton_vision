@@ -902,28 +902,19 @@ def _create_vit_tiny(pretrained_weights_path: Optional[str] = None) -> Tuple[nn.
     except ImportError:
         raise ImportError("Install timm: pip install timm")
 
-    # PHASE 1-A: Uncomment for ViT-S/14 (3-4× faster, 384 embed_dim)
-    # dinov2_model = os.environ.get("DINOV2_MODEL", "dinov2_vits14")
-    # REVERT: Use ViT-B/14 (original, 768 embed_dim)
-    dinov2_model = os.environ.get("DINOV2_MODEL", "dinov2_vitb14")
+    # PHASE 1-A: ViT-S/14 (3-4× faster, 384 embed_dim)
+    dinov2_model = os.environ.get("DINOV2_MODEL", "dinov2_vits14")
+    # To revert to ViT-B/14: dinov2_model = os.environ.get("DINOV2_MODEL", "dinov2_vitb14")
     try:
         print(f"[DINOTracker] Loading DINOv2: {dinov2_model}")
         encoder = torch.hub.load("facebookresearch/dinov2", dinov2_model)
-        # PHASE 1-A: Changed default from 768 to 384 for ViT-S/14
-        # embed_dim = getattr(encoder, "embed_dim", None) or getattr(encoder, "num_features", None) or 384
-        # REVERT: Use 768 for ViT-B/14
-        embed_dim = getattr(encoder, "embed_dim", None) or getattr(encoder, "num_features", None) or 768
+        embed_dim = getattr(encoder, "embed_dim", None) or getattr(encoder, "num_features", None) or 384
         print(f"[DINOTracker] Loaded DINOv2 (embed_dim={embed_dim})")
         return encoder, int(embed_dim)
     except Exception as e:
-        # PHASE 1-A: Changed fallback from vit_tiny to vit_small
-        # print(f"[DINOTracker] DINOv2 load failed ({e}), using timm ViT-small")
-        # encoder = timm.create_model("vit_small_patch16_224", pretrained=True, num_classes=0, dynamic_img_size=True)
-        # embed_dim = getattr(encoder, "embed_dim", 384)
-        # REVERT: Use vit_tiny fallback
-        print(f"[DINOTracker] DINOv2 load failed ({e}), using timm ViT-tiny")
-        encoder = timm.create_model("vit_tiny_patch16_224", pretrained=True, num_classes=0, dynamic_img_size=True)
-        embed_dim = getattr(encoder, "embed_dim", 192)
+        print(f"[DINOTracker] DINOv2 load failed ({e}), using timm ViT-small")
+        encoder = timm.create_model("vit_small_patch16_224", pretrained=True, num_classes=0, dynamic_img_size=True)
+        embed_dim = getattr(encoder, "embed_dim", 384)
         return encoder, int(embed_dim)
 
 
@@ -937,22 +928,13 @@ def _create_vit_by_embed_dim(embed_dim: int, pretrained_weights_path: Optional[s
     if embed_dim == 192:
         model_name = "vit_tiny_patch16_224"
     elif embed_dim == 384:
-        # PHASE 1-A: ViT-S/14 for faster inference (comment out to revert)
-        # try:
-        #     print("[DINOTracker] Loading DINOv2 ViT-S/14")
-        #     encoder = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14")
-        #     ed = getattr(encoder, "embed_dim", None) or 384
-        #     return encoder, int(ed)
-        # except Exception:
-        #     model_name = "vit_small_patch16_224"
-        # REVERT: Use ViT-B/14 for embed_dim=384 (original behavior)
         try:
-            print("[DINOTracker] Loading DINOv2 ViT-B/14")
-            encoder = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
-            ed = getattr(encoder, "embed_dim", None) or 768
+            print("[DINOTracker] Loading DINOv2 ViT-S/14")
+            encoder = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14")
+            ed = getattr(encoder, "embed_dim", None) or 384
             return encoder, int(ed)
         except Exception:
-            model_name = "vit_base_patch16_224"
+            model_name = "vit_small_patch16_224"
     elif embed_dim == 768:
         try:
             print("[DINOTracker] Loading DINOv2 ViT-B/14")
