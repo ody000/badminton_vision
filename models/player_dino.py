@@ -162,7 +162,7 @@ class DINOTracker(nn.Module):
         return _extract_cls_token(self.encoder, x)
 
     def forward_detect(self, x: torch.Tensor) -> torch.Tensor:
-        """Detection forward pass with optional FP16 autocast (inference only).
+        """Detection forward pass.
 
         Args:
             x: Tensor (B, 3, H, W)
@@ -170,13 +170,8 @@ class DINOTracker(nn.Module):
         Returns:
             Tensor (B, num_classes, 5) with [conf, cx, cy, w, h] normalized
         """
-        # FP16 only during inference (self.training == False). Training uses full precision for numerical stability.
-        use_amp = (self.device.type == "cuda") and (not self.training)
-        with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
-            feat = self.encode(x)
-            raw = self.detector_head(feat).view(x.size(0), len(TRACKED_CLASSES), 5)
-        # Sigmoid in float32 to avoid precision loss in probability outputs
-        raw = raw.float() if not use_amp else raw
+        feat = self.encode(x)
+        raw = self.detector_head(feat).view(x.size(0), len(TRACKED_CLASSES), 5)
         conf = torch.sigmoid(raw[..., :1])
         box = torch.sigmoid(raw[..., 1:])
         return torch.cat([conf, box], dim=-1)
@@ -231,9 +226,11 @@ class DINOTracker(nn.Module):
         else:
             raise TypeError("Frame must be numpy array or torch tensor")
 
-        # Forward pass
+        # Forward pass with FP16 autocast (safe under @torch.no_grad())
         x = self.preprocess(pil).unsqueeze(0).to(self.device)
-        pred = self.forward_detect(x)[0].cpu()
+        use_amp = (self.device.type == "cuda")
+        with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
+            pred = self.forward_detect(x)[0].cpu()
 
         outputs: Dict[str, Optional[Tuple[float, float, float, float, float]]] = {}
         conf = float(pred[0, 0].item())
