@@ -42,8 +42,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("[TRAIN] Loading dataset...")
 dataset = DINODataset(
     device=device,
-    data_dir="data/player_dataset",
-    annotations_file="data/player_dataset/_annotations.coco.json"
+    data_dir="data/input/train/player2",
+    annotations_file="data/input/train/player2/_annotations.coco.json"
 )
 print(f"[TRAIN] Dataset size: {len(dataset)}")
 

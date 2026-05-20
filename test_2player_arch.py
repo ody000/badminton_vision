@@ -112,7 +112,7 @@ def test_inference(model, device, dataset):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset-dir", default="data/player_dataset", help="Path to dataset")
+    parser.add_argument("--dataset-dir", default="data/input/train/player2", help="Path to dataset")
     args = parser.parse_args()
 
     print("=" * 60)
