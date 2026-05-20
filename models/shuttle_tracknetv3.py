@@ -151,6 +151,8 @@ class TrackNetV3Tracker:
         Returns {"shuttle": (ts, x, y, w, h)} or {"shuttle": None}.
         """
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Store original frame size so _run_tracknet can scale heatmap coords back
+        self._last_orig_h, self._last_orig_w = frame_rgb.shape[:2]
         resized   = cv2.resize(frame_rgb, (self.expected_size[1], self.expected_size[0]))
         self._buffer.append((timestamp, resized))
         self._frame_count += 1
@@ -211,10 +213,15 @@ class TrackNetV3Tracker:
         # to the frame that was just added to the buffer.
         heatmap = heatmap_all.float()[0, -1]  # (H_hm, W_hm)
 
-        # CRITICAL FIX: Heatmap is at reduced resolution; compute upscaling factors
+        # Scale from heatmap space → original video frame space.
+        # The U-Net outputs at the SAME resolution as input (288×512), so
+        # H_hm==H and W_hm==W, giving H/H_hm = 1.0 — that scale is useless.
+        # What we need is: original_video / heatmap, e.g. 1080/288 = 3.75.
         H_hm, W_hm = heatmap.shape
-        scale_y = H / H_hm  # Typically 8 or 16
-        scale_x = W / W_hm  # Typically 8 or 16
+        orig_h = getattr(self, "_last_orig_h", H)
+        orig_w = getattr(self, "_last_orig_w", W)
+        scale_y = orig_h / H_hm   # e.g. 1080/288 = 3.75
+        scale_x = orig_w / W_hm   # e.g. 1920/512 = 3.75
 
         conf = float(heatmap.max().item())
 
@@ -233,15 +240,17 @@ class TrackNetV3Tracker:
             self._traj_buffer.append((timestamp, -1.0, -1.0, 0.0))
             return {"shuttle": None}
 
-        # Argmax in heatmap space, then upscale to image space
+        # Argmax in heatmap space → scale to original video frame space
         flat_idx = int(heatmap.argmax().item())
-        py_hm, px_hm = divmod(flat_idx, W_hm)  # In heatmap coordinates
-        px = px_hm * scale_x  # Now in image coordinates
-        py = py_hm * scale_y
+        py_hm, px_hm = divmod(flat_idx, W_hm)
+        px_img = px_hm * scale_x
+        py_img = py_hm * scale_y
 
-        bs       = self.box_size // 2
-        x0 = max(0, int(px - bs))
-        y0 = max(0, int(py - bs))
+        # box_size is defined in heatmap pixels; scale it to video pixels too
+        bw = self.box_size * scale_x
+        bh = self.box_size * scale_y
+        x0 = max(0.0, px_img - bw / 2)
+        y0 = max(0.0, py_img - bh / 2)
 
-        self._traj_buffer.append((timestamp, float(px), float(py), 1.0))
-        return {"shuttle": (timestamp, float(x0), float(y0), float(self.box_size), float(self.box_size))}
+        self._traj_buffer.append((timestamp, float(px_img), float(py_img), 1.0))
+        return {"shuttle": (timestamp, float(x0), float(y0), float(bw), float(bh))}

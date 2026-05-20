@@ -423,7 +423,22 @@ Expected: at least 10–40 hits/min in a real badminton match. If still 0, the h
 
 ---
 
+### Task 5-G: TrackNet coordinate scaling fix — APPLIED DIRECTLY (2026-05-20)
+
+Root cause confirmed from SLURM diagnostics: `scale=(1.0×1.0)` in every log line. Haiku's partial fix scaled heatmap→input_size (288/288=1.0, useless). The missing scale is input_size→original video (288→1080 = 3.75×). Fix applied directly to `models/shuttle_tracknetv3.py`:
+- Added `self._last_orig_h, self._last_orig_w = frame_rgb.shape[:2]` in `detect()`
+- Changed `scale_y/x = orig_h/H_hm` (not `H/H_hm`) in `_run_tracknet()`
+- `box_size` also now scaled to video pixels (was being returned in heatmap pixels)
+
+No further action needed here. Haiku: do NOT re-touch this.
+
+---
+
 ### Task 5-F ⚠️ REQUIRES HUMAN DECISION BEFORE IMPLEMENTING
+
+**Update (2026-05-20):** Two-headed DINO retrain completed. SLURM diagnostics show the model has **collapsed to constant output**: confs fixed at `[0.997, 0.982]` across all 10 inference calls on different frames; box positions change by <1px per call on a 1920-wide video. The model learned to output the training-set average position with high confidence, completely ignoring input image content. This is a training failure, not a code bug.
+
+**Diagnosis:** The LoRA fine-tune (r=4) gave the head a shortcut — since badminton players are always present in training frames, minimizing loss by predicting the mean position is more efficient than learning to respond to spatial image features. The head memorized the training distribution.
 
 **Problem:** `TRACKED_CLASSES = ("player",)` is a single detection head that outputs one bounding box per frame. With two players on court the head predicts a compromise position near frame centre. This is a training-time architectural limitation — no code fix can resolve it without either retraining or replacing the detection method.
 
