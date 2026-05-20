@@ -92,7 +92,7 @@ def run(
 
     # ── Initialize components ─────────────────────────────────────────────────
     # Determine which TrackNet version to use
-    _use_v3 = bool(getattr(cfg, "tracknet_version", 3)) == 3
+    _use_v3 = int(getattr(cfg, "tracknet_version", 3)) == 3
     if _use_v3:
         from utils.background import estimate_background
         _bg_frames = int(getattr(cfg, "tracknet_bg_frames", 150))
@@ -104,9 +104,14 @@ def run(
     else:
         tracknet = TrackNetTracker(cfg=cfg)
     device = torch.device(getattr(cfg, "device", "cuda" if torch.cuda.is_available() else "cpu"))
+    _player_weights = (
+        getattr(cfg, "player_weights", None)
+        or getattr(cfg, "player_weights_path", None)
+        or getattr(cfg, "player_model_path", None)
+    )
     yolo = PlayerDetector(
-        model_path=getattr(cfg, "player_model_path", None),
-        weights_path=getattr(cfg, "player_weights_path", None),
+        model_path=_player_weights,
+        weights_path=None,
         pretrained_backbone_path=getattr(cfg, "pretrained_backbone_path", None),
         device=device,
         input_size=getattr(cfg, "player_input_size", 384),

@@ -273,6 +273,16 @@ model, history = train_dino(
 print("[TRAIN] Training complete!")
 print(f"[TRAIN] Checkpoint saved to: {os.path.join(output_dir, checkpoint_name)}")
 ENDPYTHON
+        # Copy checkpoint to models/ so inference scripts find it at models/dino_player.pt
+        mkdir -p models
+        _src="${OUTPUT_DIR}/${CHECKPOINT_NAME}"
+        _dst="models/${CHECKPOINT_NAME}"
+        if [[ -f "${_src}" ]]; then
+            cp "${_src}" "${_dst}"
+            echo "[SLURM] Copied checkpoint: ${_src} → ${_dst}"
+        else
+            echo "[SLURM] WARNING: checkpoint not found at ${_src}; skipping copy"
+        fi
         ;;
 
     *)
