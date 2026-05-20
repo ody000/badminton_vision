@@ -154,6 +154,7 @@ def run(
     tracking_results: list[dict] = []
     events: list[dict] = []
     final_timestamp = 0.0
+    _frame_hw: list[int | None] = [None, None]  # actual video [h, w]; set from first frame
 
     # ── Stroke surrounding-frame buffer (Phase 4-B) ───────────────────────────
     # Keeps a rolling window of recent raw frames so StrokeClassifier can access
@@ -210,6 +211,8 @@ def run(
         nonlocal final_timestamp
         final_timestamp = timestamp
         h, w = frame_bgr.shape[:2]
+        if _frame_hw[0] is None:
+            _frame_hw[0], _frame_hw[1] = h, w
 
         # Keep rolling window of raw frames for multi-frame stroke pose extraction (Phase 4-B)
         _frame_window.append((frame_bgr.copy(), frame_idx, timestamp))
@@ -424,17 +427,12 @@ def run(
         _cp_points = next(iter(_cp_data.values())) if _cp_data else []
 
         if _cp_points and len(tracking_results) > 0:
-            # Determine frame size from first frame with a known player position
-            _fh, _fw = 0, 0
-            for _fr in tracking_results:
-                if _fr.get("players"):
-                    _p = _fr["players"][0]
-                    _box = _p.get("box")
-                    if _box:
-                        # Rough estimate: x2,y2 give a lower bound on dimensions
-                        _fw = max(_fw, int(_box[2]))
-                        _fh = max(_fh, int(_box[3]))
-            if _fh == 0 or _fw == 0:
+            # Use actual video frame dimensions captured during processing.
+            # Previous approach used player bbox corners (x2, y2) as a proxy,
+            # which gave fw≈800 on a 1280px-wide video — breaking homography.
+            if _frame_hw[0] is not None:
+                _fh, _fw = _frame_hw[0], _frame_hw[1]
+            else:
                 _fh, _fw = 1080, 1920   # safe fallback
 
             _hm_path = os.path.join(run_dir, "heatmap.png")

@@ -1081,28 +1081,54 @@ def _create_vit_by_embed_dim(embed_dim: int, pretrained_weights_path: Optional[s
 
 
 def _extract_cls_token(encoder: nn.Module, x: torch.Tensor) -> torch.Tensor:
-    """Extract class token from encoder."""
+    """Extract mean patch-token embedding from encoder.
+
+    Uses the AVERAGE of spatial patch tokens (excluding the CLS register token)
+    rather than the CLS token alone.
+
+    Why: the CLS token aggregates the entire image into a single vector.  With
+    two players on court, the attention-weighted mean of both players' features
+    collapses spatial information — the regression head then learns to predict
+    the training-set mean position rather than track actual player locations
+    (confirmed: output std 11-23px vs. 100-300px of real player movement).
+
+    Patch tokens retain position-dependent features: each token at grid cell
+    (r, c) primarily encodes the corresponding 14×14 image region.  Averaging
+    them preserves spatial bias and gives the detection head a richer,
+    location-sensitive signal to regress two independent player positions from.
+
+    NOTE: requires retraining from scratch — head weights calibrated to the CLS
+    token distribution are incompatible with patch-average distribution.
+    """
     if hasattr(encoder, "forward_features"):
         features = encoder.forward_features(x)
     else:
         features = encoder(x)
 
     if isinstance(features, dict):
+        # DINOv2 preferred: pre-normalized patch tokens (B, N, D) — spatial only
+        if "x_norm_patchtokens" in features:
+            return features["x_norm_patchtokens"].mean(dim=1)   # (B, D)
+        # Pre-norm tensor (B, N+1, D): index 0 = CLS, 1: = patches
+        if "x_prenorm" in features:
+            x_pre = features["x_prenorm"]
+            if x_pre.dim() == 3:
+                return x_pre[:, 1:, :].mean(dim=1)
+            return x_pre
+        # Older DINOv2 / timm fallback (loses spatial info — avoid if possible)
         if "x_norm_clstoken" in features:
             return features["x_norm_clstoken"]
         if "cls_token" in features:
             return features["cls_token"]
-        if "x_prenorm" in features:
-            x_pre = features["x_prenorm"]
-            return x_pre[:, 0, :] if x_pre.dim() == 3 else x_pre
 
     if isinstance(features, torch.Tensor):
         if features.dim() == 3:
-            return features[:, 0, :]
+            # (B, N+1, D): skip index 0 (CLS), average patch tokens
+            return features[:, 1:, :].mean(dim=1)
         if features.dim() == 2:
             return features
 
-    raise RuntimeError("Unable to extract class token")
+    raise RuntimeError("Unable to extract patch features")
 
 
 class LoRALinear(nn.Module):

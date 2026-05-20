@@ -79,7 +79,10 @@ class TrackNetV3Tracker:
         self._buffer: deque[tuple[float, np.ndarray]] = deque(maxlen=SEQ_LEN)
 
         # Background image (H, W, 3) uint8 — set via set_background() or constructor
-        self._background: np.ndarray | None = background
+        self._background: np.ndarray | None = None
+        # Precomputed background tensor (3, H, W) float32 on CPU — built once in
+        # set_background() so _run_tracknet doesn't re-convert every frame.
+        self._background_t: Optional[torch.Tensor] = None
 
         # Load TrackNet V3.
         # out_channels must match the pretrained checkpoint: one heatmap per input
@@ -131,14 +134,26 @@ class TrackNetV3Tracker:
         # Stores (timestamp, x, y, visibility) tuples from TrackNet raw output
         self._traj_buffer: List[Tuple[float, float, float, float]] = []
 
+        # Precompute background tensor if provided in constructor
+        if background is not None:
+            self.set_background(background)
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def set_fps(self, fps: float) -> None:
         self.fps = float(fps)
 
     def set_background(self, background: np.ndarray) -> None:
-        """Set the background estimate (H, W, 3) uint8 BGR."""
+        """Set the background estimate (H, W, 3) uint8 BGR.
+
+        Precomputes the resized+normalized tensor so _run_tracknet() can reuse
+        it every frame without repeating the BGR→RGB conversion and cv2.resize.
+        """
         self._background = background
+        H, W = self.expected_size
+        bg_rgb = cv2.cvtColor(background, cv2.COLOR_BGR2RGB)
+        bg_rs  = cv2.resize(bg_rgb, (W, H))
+        self._background_t = torch.from_numpy(bg_rs).float().permute(2, 0, 1) / 255.0  # (3,H,W)
 
     @torch.no_grad()
     def detect(
@@ -187,11 +202,9 @@ class TrackNetV3Tracker:
         frames_t  = torch.from_numpy(frames_np).float().permute(0, 3, 1, 2) / 255.0  # (8, 3, H, W)
         frames_t  = frames_t.reshape(-1, H, W)  # (24, H, W)
 
-        # Background: (3, H, W)
-        if self._background is not None:
-            bg_rgb   = cv2.cvtColor(self._background, cv2.COLOR_BGR2RGB)
-            bg_rs    = cv2.resize(bg_rgb, (W, H))
-            bg_t     = torch.from_numpy(bg_rs).float().permute(2, 0, 1) / 255.0  # (3, H, W)
+        # Background: (3, H, W) — use precomputed tensor (built once in set_background)
+        if self._background_t is not None:
+            bg_t = self._background_t
         else:
             bg_t = torch.zeros(3, H, W)
 
