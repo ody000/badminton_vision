@@ -205,32 +205,43 @@ class TrackNetV3Tracker:
 
         use_amp = (self.device.type == "cuda")
         with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
-            heatmap_all = self.tracknet(inp)  # (1, SEQ_LEN, H, W)
+            heatmap_all = self.tracknet(inp)  # (1, SEQ_LEN, H_hm, W_hm)
         # Take the last channel: prediction for the most recent (current) frame.
         # The V3 model outputs one heatmap per input frame; channel [-1] corresponds
         # to the frame that was just added to the buffer.
-        heatmap = heatmap_all.float()[0, -1]  # (H, W)
+        heatmap = heatmap_all.float()[0, -1]  # (H_hm, W_hm)
+
+        # CRITICAL FIX: Heatmap is at reduced resolution; compute upscaling factors
+        H_hm, W_hm = heatmap.shape
+        scale_y = H / H_hm  # Typically 8 or 16
+        scale_x = W / W_hm  # Typically 8 or 16
 
         conf = float(heatmap.max().item())
 
         # TEMPORARY DIAGNOSTIC — remove after first confirmed run (Task 5-D)
         if self._frame_count <= 20:
             flat_idx = int(heatmap.argmax().item())
-            py, px = divmod(flat_idx, W)
+            py_hm, px_hm = divmod(flat_idx, W_hm)  # Correct: use heatmap width
+            px_img = px_hm * scale_x  # Upscale to image space
+            py_img = py_hm * scale_y
             print(f"[TRACKNETV3 DIAG] frame={self._frame_count} "
-                  f"heatmap_max={conf:.4f} heatmap_mean={float(heatmap.mean()):.4f} "
-                  f"argmax_px=({px},{py})")
+                  f"heatmap_max={conf:.4f} heatmap_shape=({H_hm}×{W_hm}) "
+                  f"scale=({scale_y:.1f}×{scale_x:.1f}) "
+                  f"argmax_hm=({px_hm},{py_hm}) argmax_img=({px_img:.1f},{py_img:.1f})")
 
         if conf < self.conf_threshold:
             self._traj_buffer.append((timestamp, -1.0, -1.0, 0.0))
             return {"shuttle": None}
 
-        # Argmax → pixel position
+        # Argmax in heatmap space, then upscale to image space
         flat_idx = int(heatmap.argmax().item())
-        py, px   = divmod(flat_idx, W)
+        py_hm, px_hm = divmod(flat_idx, W_hm)  # In heatmap coordinates
+        px = px_hm * scale_x  # Now in image coordinates
+        py = py_hm * scale_y
+
         bs       = self.box_size // 2
-        x0 = max(0, px - bs)
-        y0 = max(0, py - bs)
+        x0 = max(0, int(px - bs))
+        y0 = max(0, int(py - bs))
 
         self._traj_buffer.append((timestamp, float(px), float(py), 1.0))
         return {"shuttle": (timestamp, float(x0), float(y0), float(self.box_size), float(self.box_size))}

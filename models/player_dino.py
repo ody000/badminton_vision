@@ -48,7 +48,7 @@ VAL_EVERY = 1
 VAL_IOU_THRESHOLD = 0.5
 BOX_LOSS_WEIGHT = 0.05
 
-TRACKED_CLASSES = ("player",)  # Player-only (removed shuttle)
+TRACKED_CLASSES = ("player_1", "player_2")  # Two-player detection
 
 
 @dataclass
@@ -135,11 +135,12 @@ class DINOTracker(nn.Module):
             [transforms.Resize((self.input_size, self.input_size)), transforms.ToTensor()]
         )
 
-        # Detection head: [confidence, cx, cy, w, h] for player only
+        # Detection head: [conf, cx, cy, w, h] for each player
+        # TRACKED_CLASSES has 2 players, so output 10 values (5 per player)
         self.detector_head = nn.Sequential(
             nn.Linear(self.encoder_dim, self.encoder_dim),
             nn.GELU(),
-            nn.Linear(self.encoder_dim, len(TRACKED_CLASSES) * 5),
+            nn.Linear(self.encoder_dim, len(TRACKED_CLASSES) * 5),  # 10 outputs: player_1(5) + player_2(5)
         )
         self.to(self.device)
 
@@ -254,8 +255,8 @@ class DINOTracker(nn.Module):
         frame,
         timestamp: float = 0.0,
         min_confidence: float = MIN_CONFIDENCE,
-    ) -> Dict[str, Optional[Tuple[float, float, float, float, float]]]:
-        """Detect player in frame.
+    ) -> Dict[str, Optional[List[Tuple[float, float, float, float, float]]]]:
+        """Detect two players in frame.
 
         Args:
             frame: Input frame (numpy HxWx3, grayscale HxW, or torch tensor)
@@ -263,7 +264,8 @@ class DINOTracker(nn.Module):
             min_confidence: Confidence threshold
 
         Returns:
-            {"player": (ts, x, y, w, h)} or {"player": None}
+            {"players": [(ts, x, y, w, h), (ts, x, y, w, h)]} or {"players": None}
+            Returns two detections in order: lower y (top player), higher y (bottom player)
         """
         if isinstance(frame, np.ndarray):
             if frame.ndim == 2:
@@ -295,27 +297,38 @@ class DINOTracker(nn.Module):
         x = self.preprocess(pil).unsqueeze(0).to(self.device)
         use_amp = (self.device.type == "cuda")
         with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
-            pred = self.forward_detect(x)[0].cpu()
+            pred = self.forward_detect(x)[0].cpu()  # (10,) for two players
 
-        outputs: Dict[str, Optional[Tuple[float, float, float, float, float]]] = {}
-        conf = float(pred[0, 0].item())
+        outputs: Dict[str, Optional[List[Tuple[float, float, float, float, float]]]] = {}
+
+        # Parse two player detections: [conf1, cx1, cy1, w1, h1, conf2, cx2, cy2, w2, h2]
+        players = []
+        for i in range(len(TRACKED_CLASSES)):
+            offset = i * 5
+            conf = float(pred[offset].item())
+            box_norm = pred[offset + 1:offset + 5]
+
+            if conf >= min_confidence:
+                box_xywh = _cxcywh_norm_to_xywh(box_norm.unsqueeze(0), orig_w, orig_h)[0]
+                x0, y0, w, h = [float(v.item()) for v in box_xywh]
+                players.append({"index": i, "y": y0 + h/2, "det": (timestamp, x0, y0, w, h), "conf": conf})
 
         # TEMPORARY DIAGNOSTIC — remove after first confirmed run (Task 5-D)
         if not hasattr(self, '_diag_count'):
             self._diag_count = 0
         if self._diag_count < 10:
             self._diag_count += 1
-            box_raw = pred[0, 1:].tolist()
-            print(f"[DINO DIAG] frame≈{self._diag_count} conf={conf:.4f} "
-                  f"box_norm={[round(v,3) for v in box_raw]}")
+            confs = [float(pred[i*5].item()) for i in range(len(TRACKED_CLASSES))]
+            print(f"[DINO DIAG] frame≈{self._diag_count} confs={[round(c,3) for c in confs]} "
+                  f"count={len(players)}")
 
-        if conf < min_confidence:
-            outputs["player"] = None
+        # Sort by y-coordinate to ensure consistent ordering (top to bottom)
+        players.sort(key=lambda p: p["y"])
+
+        if players:
+            outputs["players"] = [p["det"] for p in players]
         else:
-            box_norm = pred[0, 1:]
-            box_xywh = _cxcywh_norm_to_xywh(box_norm.unsqueeze(0), orig_w, orig_h)[0]
-            x0, y0, w, h = [float(v.item()) for v in box_xywh]
-            outputs["player"] = (timestamp, x0, y0, w, h)
+            outputs["players"] = None
 
         return outputs
 
@@ -326,7 +339,7 @@ class DINOTracker(nn.Module):
         timestamp: float = 0.0,
         min_confidence: float = MIN_CONFIDENCE,
     ) -> List[dict]:
-        """Detect player, returning YOLO-compatible format with optional interval caching.
+        """Detect two players, returning YOLO-compatible format with optional interval caching.
 
         Returns a list of dicts with "id", "box", and "feet" keys for
         compatibility with player_context.py and other pipeline components.
@@ -337,7 +350,8 @@ class DINOTracker(nn.Module):
             min_confidence: Confidence threshold
 
         Returns:
-            [{"id": 0, "box": [x1, y1, x2, y2], "feet": (cx, y2), "feet_real": None}]
+            [{"id": 0, "box": [x1, y1, x2, y2], "feet": (cx, y2), "feet_real": None},
+             {"id": 1, "box": [x1, y1, x2, y2], "feet": (cx, y2), "feet_real": None}]
             or [] if no detection
         """
         # Always run inference on first frame (frame 0) regardless of interval (Bug 5-B Cause C)
@@ -346,28 +360,34 @@ class DINOTracker(nn.Module):
 
         if run_inference:
             result = self.detect(frame, timestamp, min_confidence)
-            player_det = result.get("player")
+            players_det = result.get("players")
 
-            if player_det is None:
+            if players_det is None:
                 self._detect_cache = []
             else:
-                ts, x, y, w, h = player_det
                 if isinstance(frame, np.ndarray):
                     orig_h, orig_w = frame.shape[:2]
                 elif isinstance(frame, torch.Tensor):
                     orig_h, orig_w = int(frame.shape[1]), int(frame.shape[2])
                 else:
                     orig_h, orig_w = 1080, 1920
-                x1, y1 = x, y
-                x2, y2 = x + w, y + h
-                x1 = max(0.0, min(x1, orig_w - 1.0))
-                y1 = max(0.0, min(y1, orig_h - 1.0))
-                x2 = max(x1 + 1.0, min(x2, float(orig_w)))
-                y2 = max(y1 + 1.0, min(y2, float(orig_h)))
-                cx = (x1 + x2) / 2.0
-                self._detect_cache = [
-                    {"id": 0, "box": [x1, y1, x2, y2], "feet": (cx, y2), "feet_real": None}
-                ]
+
+                self._detect_cache = []
+                for player_id, player_det in enumerate(players_det):
+                    ts, x, y, w, h = player_det
+                    x1, y1 = x, y
+                    x2, y2 = x + w, y + h
+                    x1 = max(0.0, min(x1, orig_w - 1.0))
+                    y1 = max(0.0, min(y1, orig_h - 1.0))
+                    x2 = max(x1 + 1.0, min(x2, float(orig_w)))
+                    y2 = max(y1 + 1.0, min(y2, float(orig_h)))
+                    cx = (x1 + x2) / 2.0
+                    self._detect_cache.append({
+                        "id": player_id,
+                        "box": [x1, y1, x2, y2],
+                        "feet": (cx, y2),
+                        "feet_real": None
+                    })
 
         return self._detect_cache
 
@@ -510,14 +530,19 @@ class DINODataset(Dataset):
     def _pick_representative_boxes(
         self, anns: Iterable[dict], img_w: float, img_h: float
     ) -> Dict[str, Optional[torch.Tensor]]:
-        """Pick largest box per class."""
-        buckets: Dict[str, List[torch.Tensor]] = {k: [] for k in TRACKED_CLASSES}
+        """Pick two player boxes: player_1 (top) and player_2 (bottom), or largest boxes.
+
+        For two-player tracking, we need to return two player boxes sorted by y-coordinate.
+        """
+        player_boxes = []
+
         for ann in anns:
             cat_id = ann.get("category_id")
             cname = self.categories.get(cat_id, "")
-            mapped = self.coco_name_to_track.get(cname)
-            if mapped is None:
+            # Only pick "person" annotations as both player_1 and player_2
+            if cname != "person":
                 continue
+
             bbox = ann.get("bbox", None)
             if not bbox or len(bbox) != 4:
                 continue
@@ -526,14 +551,22 @@ class DINODataset(Dataset):
             y = max(0.0, min(y, img_h - 1.0))
             w = max(0.0, min(w, img_w - x))
             h = max(0.0, min(h, img_h - y))
-            buckets[mapped].append(torch.tensor([x, y, w, h], dtype=torch.float32))
+
+            box_tensor = torch.tensor([x, y, w, h], dtype=torch.float32)
+            y_center = y + h / 2.0
+            player_boxes.append((y_center, box_tensor))
+
+        # Sort by y-coordinate (top to bottom)
+        player_boxes.sort(key=lambda p: p[0])
 
         out = {}
-        for key, vals in buckets.items():
-            if not vals:
-                out[key] = None
-                continue
-            out[key] = max(vals, key=lambda b: float((b[2] * b[3]).item()))
+        # Assign the two topmost players to player_1 and player_2
+        for idx, class_name in enumerate(TRACKED_CLASSES):
+            if idx < len(player_boxes):
+                out[class_name] = player_boxes[idx][1]
+            else:
+                out[class_name] = None
+
         return out
 
     def __getitem__(self, idx):
