@@ -78,7 +78,9 @@ class TrackNetTracker:
             except Exception as e:
                 print(f"[TRACKNET] Warning: failed to inspect weights ({e}), using default out_channels=1")
 
-        self.model = TrackNet(out_channels=out_ch)
+        # Create TrackNet with TensorFlow BatchNorm compatibility for V2 pretrained weights
+        # (V3 weights would use tf_bn_compat=False, but TrackNetTracker is for V2 only)
+        self.model = TrackNet(out_channels=out_ch, tf_bn_compat=True)
         if state is not None:
             try:
                 sd = state.get("state_dict", state) if isinstance(state, dict) else state
@@ -95,6 +97,9 @@ class TrackNetTracker:
         # Position history for temporal smoothing (last 5 positions)
         self.position_history: list[tuple[float, float]] = []  # [(x, y), ...]
         self.max_history = 5
+
+        # Diagnostic: store last raw heatmap for debugging (5-A verification)
+        self.last_raw_heatmap: np.ndarray | None = None
 
     def set_fps(self, fps: float) -> None:
         """Update the fps used for timestamp-gap flush detection."""
@@ -213,11 +218,27 @@ class TrackNetTracker:
         """Find argmax of heatmap and return bounding box + confidence.
 
         Returns (x0, y0, w, h, conf).
+
+        Note: heatmap is post-sigmoid [0,1] range. We store it for diagnostics.
         """
         eh, ew = self.expected_size
+
+        # Store raw heatmap for debugging (5-A verification)
+        self.last_raw_heatmap = heatmap.copy() if isinstance(heatmap, np.ndarray) else np.array(heatmap)
+
         if heatmap.shape[0] != frame_h or heatmap.shape[1] != frame_w:
             heatmap = cv2.resize(heatmap, (frame_w, frame_h))
-        _, maxv, _, maxloc = cv2.minMaxLoc(heatmap.astype(np.float32))
+
+        heatmap_f32 = heatmap.astype(np.float32)
+        conf = float(np.max(heatmap_f32))
+
+        # Minimum confidence guard: return explicit "no detection" if below threshold
+        if conf < self.conf_threshold:
+            # Do NOT argmax on low-confidence heatmap — return zero position
+            return 0, 0, self.box_size, self.box_size, conf
+
+        # Only reach argmax when there is a genuine peak
+        _, maxv, _, maxloc = cv2.minMaxLoc(heatmap_f32)
         cx, cy = int(maxloc[0]), int(maxloc[1])
         half = self.box_size // 2
         x0 = max(0, cx - half)

@@ -191,6 +191,28 @@ def precompute_heatmap(
 
     H = compute_homography(court_points, frame_h, frame_w)
 
+    # Diagnostic: verify court_points calibration by projecting corners (Bug 5-C Cause D)
+    if H is not None and court_points and len(court_points) >= 4:
+        test_pts = np.array(court_points[:4], dtype=np.float32).reshape(-1, 1, 2)
+        try:
+            projected = cv2.perspectiveTransform(test_pts, H)
+            proj_coords = projected.reshape(-1, 2).tolist()
+            print(f"[HEATMAP] Court corners project to insert coords:")
+            print(f"  BL (top-left):     {proj_coords[0]}")
+            print(f"  BR (top-right):    {proj_coords[1]}")
+            print(f"  TR (bottom-right): {proj_coords[2]}")
+            print(f"  TL (bottom-left):  {proj_coords[3]}")
+            # Check if projections are roughly within bounds [0,INSERT_W] × [0,INSERT_H]
+            in_bounds = all(
+                0 <= coord[0] <= INSERT_W and 0 <= coord[1] <= INSERT_H
+                for coord in proj_coords
+            )
+            if not in_bounds:
+                print(f"[HEATMAP] WARNING: some projections are outside insert bounds "
+                      f"[0,{INSERT_W}] × [0,{INSERT_H}]. Court calibration may be wrong.")
+        except Exception as e:
+            print(f"[HEATMAP] Warning: could not verify court calibration: {e}")
+
     # Create heatmap accumulators for each player
     heatmaps = {pid: np.zeros((INSERT_H, INSERT_W), dtype=np.float32) for pid in player_ids}
     player_colors = {player_ids[0]: p1_color_bgr}

@@ -182,10 +182,25 @@ class DINOTracker(nn.Module):
         Also handles LoRA-trained checkpoints: if the saved state dict contains
         LoRA keys (*.lora_A / *.lora_B), LoRA is applied to the encoder
         automatically before loading so the key names match.
+
+        Fixes Bug 5-B by stripping common prefixes (student., module., model., backbone.)
+        that may be present from teacher-student training or DataParallel.
         """
         state = torch.load(path, map_location=self.device)
         if isinstance(state, dict) and "model" in state:
             state = state["model"]
+
+        # Strip common prefixes from teacher-student or DataParallel checkpoints (Bug 5-B Cause A)
+        if isinstance(state, dict):
+            cleaned = {}
+            for k, v in state.items():
+                k_clean = k
+                for prefix in ("student.", "module.", "model.", "backbone."):
+                    if k_clean.startswith(prefix):
+                        k_clean = k_clean[len(prefix):]
+                        break
+                cleaned[k] = v
+            state = cleaned
 
         # Detect LoRA checkpoint: look for any key ending in 'lora_A' or 'lora_B'
         is_lora_ckpt = isinstance(state, dict) and any(
@@ -217,6 +232,15 @@ class DINOTracker(nn.Module):
         if n_missing:
             print(f"[DINOTracker]   missing: {result.missing_keys[:5]}"
                   f"{'...' if n_missing > 5 else ''}")
+
+        # Sanity check: verify detector_head loaded (Bug 5-B Cause A)
+        head_params = list(self.detector_head.parameters())
+        if head_params:
+            head_norm = sum(p.abs().mean().item() for p in head_params) / len(head_params)
+            print(f"[DINOTracker] detector_head mean abs weight: {head_norm:.6f}")
+            if head_norm < 1e-4:
+                print("[DINOTracker] WARNING: detector_head appears uninitialized. "
+                      "Check checkpoint key prefixes or checkpoint validity.")
 
     def save_checkpoint(self, path: str) -> None:
         """Save checkpoint."""
@@ -301,7 +325,8 @@ class DINOTracker(nn.Module):
             [{"id": 0, "box": [x1, y1, x2, y2], "feet": (cx, y2), "feet_real": None}]
             or [] if no detection
         """
-        run_inference = (self._detect_frame_count % self._detect_interval == 0)
+        # Always run inference on first frame (frame 0) regardless of interval (Bug 5-B Cause C)
+        run_inference = (self._detect_frame_count % self._detect_interval == 0) or (self._detect_frame_count == 0)
         self._detect_frame_count += 1
 
         if run_inference:

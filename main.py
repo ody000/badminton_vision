@@ -284,11 +284,16 @@ def run(
         game_state.update(timestamp, shuttle_tuple, frame_size=(h, w))
 
         # 6. Record tracking result
+        player_dicts = [p.to_dict() for p in players]
+        # Ensure feet_px is populated for heatmap (Bug 5-C Cause B)
+        for p_dict in player_dicts:
+            if "feet_px" not in p_dict and "feet" in p_dict:
+                p_dict["feet_px"] = p_dict["feet"]
         tracking_results.append({
             "frame_idx": frame_idx,
             "timestamp": timestamp,
             "shuttle": shuttle.to_dict() if shuttle is not None else None,
-            "players": [p.to_dict() for p in players],
+            "players": player_dicts,
             "rally_active": game_state.rally_active,
         })
 
