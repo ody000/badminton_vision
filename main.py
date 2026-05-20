@@ -117,10 +117,13 @@ def run(
         input_size=getattr(cfg, "player_input_size", 384),
     )
     # ── CUDA diagnostic (Priority 0 verification) ───────────────────────────────
+    # TrackNetV3Tracker stores network as .tracknet; V2 TrackNetTracker uses .model
+    _tracknet_net = getattr(tracknet, "tracknet", None) or getattr(tracknet, "model", None)
+    _tracknet_device = next(_tracknet_net.parameters()).device if _tracknet_net is not None else "unknown"
     print(f"[MAIN] CUDA diagnostic: "
           f"torch.cuda.is_available()={torch.cuda.is_available()}, "
           f"yolo.encoder.device={next(yolo.encoder.parameters()).device}, "
-          f"tracknet.model.device={next(tracknet.model.parameters()).device}")
+          f"tracknet.device={_tracknet_device}")
 
     # ── Phase 1-B: Player detection interval caching ─────────────────────────────
     _player_interval = int(getattr(cfg, "player_detect_interval", 1))

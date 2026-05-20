@@ -25,7 +25,13 @@
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 VIDEO_PATH="${VIDEO_PATH:-data/input/match_clip.mp4}"
+# TRACKNET_VERSION: 2 or 3 (default 3).  Must match config.yaml tracknet_version.
+TRACKNET_VERSION="${TRACKNET_VERSION:-3}"
+# V2 weight override (only used when TRACKNET_VERSION=2):
 SHUTTLE_WEIGHTS="${SHUTTLE_WEIGHTS:-models/tracknet.pt}"
+# V3 weight overrides (only used when TRACKNET_VERSION=3); leave empty to use config.yaml values:
+TRACKNETV3_WEIGHTS="${TRACKNETV3_WEIGHTS:-}"
+INPAINTNET_WEIGHTS="${INPAINTNET_WEIGHTS:-}"
 COURT_POINTS="${COURT_POINTS:-data/input/court_points.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-data/output}"
 DEVICE="${DEVICE:-cuda}"
@@ -58,11 +64,28 @@ echo "[SLURM_TRACK] torch OK — $(${PYTHON_CMD} -c 'import torch; print(torch._
 echo "[SLURM_TRACK] CUDA available: $(${PYTHON_CMD} -c 'import torch; print(torch.cuda.is_available())')"
 
 echo "[SLURM_TRACK] VIDEO_PATH=${VIDEO_PATH}"
-echo "[SLURM_TRACK] SHUTTLE_WEIGHTS=${SHUTTLE_WEIGHTS}"
+echo "[SLURM_TRACK] TRACKNET_VERSION=${TRACKNET_VERSION}"
+if [[ "${TRACKNET_VERSION}" == "3" ]]; then
+    echo "[SLURM_TRACK] TRACKNETV3_WEIGHTS=${TRACKNETV3_WEIGHTS:-<from config.yaml>}"
+    echo "[SLURM_TRACK] INPAINTNET_WEIGHTS=${INPAINTNET_WEIGHTS:-<from config.yaml>}"
+else
+    echo "[SLURM_TRACK] SHUTTLE_WEIGHTS=${SHUTTLE_WEIGHTS}"
+fi
 echo "[SLURM_TRACK] COURT_POINTS=${COURT_POINTS}"
 echo "[SLURM_TRACK] OUTPUT_DIR=${OUTPUT_DIR}"
 echo "[SLURM_TRACK] DEVICE=${DEVICE}"
 echo "[SLURM_TRACK] Starting at $(date)"
+
+# ── Build --set overrides based on TrackNet version ───────────────────────────
+_SET_ARGS=("--set" "tracknet_version=${TRACKNET_VERSION}")
+if [[ "${TRACKNET_VERSION}" == "3" ]]; then
+    # V3: override weight paths only if explicitly provided; otherwise config.yaml wins
+    [[ -n "${TRACKNETV3_WEIGHTS}" ]] && _SET_ARGS+=("--set" "tracknetv3_weights=${TRACKNETV3_WEIGHTS}")
+    [[ -n "${INPAINTNET_WEIGHTS}" ]] && _SET_ARGS+=("--set" "inpaintnet_weights=${INPAINTNET_WEIGHTS}")
+else
+    # V2: always pass shuttle weights override
+    _SET_ARGS+=("--set" "tracknet_weights=${SHUTTLE_WEIGHTS}")
+fi
 
 # ── Run inference ─────────────────────────────────────────────────────────────
 ${PYTHON_CMD} main.py \
@@ -71,6 +94,6 @@ ${PYTHON_CMD} main.py \
     --court-points "${COURT_POINTS}" \
     --output-dir "${OUTPUT_DIR}" \
     --device "${DEVICE}" \
-    --set tracknet_weights="${SHUTTLE_WEIGHTS}"
+    "${_SET_ARGS[@]}"
 
 echo "[SLURM_TRACK] Finished at $(date)"
