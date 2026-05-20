@@ -19,6 +19,7 @@ import random
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
+import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
