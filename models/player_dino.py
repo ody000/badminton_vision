@@ -201,6 +201,10 @@ class DINOTracker(nn.Module):
                     lora_r = int(v.shape[1])
                     break
             n = apply_lora_to_encoder(self.encoder, r=lora_r)
+            # apply_lora_to_encoder creates new LoRALinear modules after the model
+            # was already moved to device — the new lora_A/lora_B params are born
+            # on CPU.  Push the encoder back to the target device.
+            self.encoder.to(self.device)
             print(f"[DINOTracker] LoRA checkpoint detected (r={lora_r}); "
                   f"applied LoRA to {n} encoder layers before loading")
 
