@@ -48,7 +48,7 @@ class TrackNetV3Tracker:
         inpaintnet_path: str | None = None,
         background: np.ndarray | None = None,
         device: str | None = None,
-        box_size: int = 16,
+        box_size: int = 7,
         conf_threshold: float = 0.5,
         expected_h: int = INPUT_H,
         expected_w: int = INPUT_W,
@@ -246,9 +246,11 @@ class TrackNetV3Tracker:
         px_img = px_hm * scale_x
         py_img = py_hm * scale_y
 
-        # box_size is defined in heatmap pixels; scale it to video pixels too
-        bw = self.box_size * scale_x
-        bh = self.box_size * scale_y
+        # box_size is defined in heatmap pixels; scale it to video pixels.
+        # Cap at VIDEO_BOX_MAX so the circle stays shuttle-sized on high-res input.
+        VIDEO_BOX_MAX = 22  # px in video space; shuttle is ~6-10px at 720p
+        bw = min(self.box_size * scale_x, VIDEO_BOX_MAX)
+        bh = min(self.box_size * scale_y, VIDEO_BOX_MAX)
         x0 = max(0.0, px_img - bw / 2)
         y0 = max(0.0, py_img - bh / 2)
 

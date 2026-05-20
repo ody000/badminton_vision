@@ -436,26 +436,290 @@ No further action needed here. Haiku: do NOT re-touch this.
 
 ### Task 5-F ⚠️ REQUIRES HUMAN DECISION BEFORE IMPLEMENTING
 
-**Update (2026-05-20):** Two-headed DINO retrain completed. SLURM diagnostics show the model has **collapsed to constant output**: confs fixed at `[0.997, 0.982]` across all 10 inference calls on different frames; box positions change by <1px per call on a 1920-wide video. The model learned to output the training-set average position with high confidence, completely ignoring input image content. This is a training failure, not a code bug.
+**Update (2026-05-20, revised):** The "collapsed model" diagnosis in the earlier version of this note was INCORRECT. The "constant conf, constant position" behavior in SLURM log 2738083 was produced by the OLD one-headed LoRA checkpoint, NOT the retrained two-headed model. The retrained checkpoint was never deployed due to a path bug (see below). The retrained model metrics are healthy: mAP=0.9351, val_iou=0.7531 over 30 epochs — these are not signs of collapse.
 
-**Diagnosis:** The LoRA fine-tune (r=4) gave the head a shortcut — since badminton players are always present in training frames, minimizing loss by predicting the mean position is more efficient than learning to respond to spatial image features. The head memorized the training distribution.
+**The actual problem is a deployment bug:** The SLURM training script saved the checkpoint to `data/output/dino_player_2player.pt` but the copy step referenced `data/output/dino_player.pt` (wrong name), silently skipped, and `models/dino_player.pt` still contains the old checkpoint. SLURM log 2738083 confirms: `LoRA checkpoint detected (r=4)` — this is the old model loading.
 
-**Problem:** `TRACKED_CLASSES = ("player",)` is a single detection head that outputs one bounding box per frame. With two players on court the head predicts a compromise position near frame centre. This is a training-time architectural limitation — no code fix can resolve it without either retraining or replacing the detection method.
+**Correct priority order:**
+1. **First: deploy the existing retrained checkpoint** (5 minutes, no compute needed). If it works, nothing else is needed.
+2. **Only if deployed DINO still shows stuck/constant behavior:** fall back to MOG2 (Task 5-H).
 
-**Two options — do NOT implement either without explicit instruction from the engineer:**
+**Deployment steps (engineer does this on OSCAR before next tracking run):**
+```bash
+cp data/output/dino_player_2player.pt models/dino_player.pt
+```
+And in `models/player_dino.py`, update:
+```python
+# BEFORE:
+TRACKED_CLASSES = ("player",)
+# AFTER:
+TRACKED_CLASSES = ("player_1", "player_2")
+```
+The inference code in `forward_detect()` uses `len(TRACKED_CLASSES)` to size the output, so changing this constant is sufficient — no other code changes needed.
 
-**Option A — Retrain with dual-class head (recommended if GPU time is available):**
-- Change `TRACKED_CLASSES = ("player_top", "player_bottom")` in `models/player_dino.py`
-- The detection head output changes from `(B, 1, 5)` to `(B, 2, 5)`
-- Dataset labels need to be split by y-centroid: player with `cy < frame_h/2` → `player_top`, otherwise `player_bottom`
-- Retrain for 75 epochs. Expected training time: 4–6h on A100. No backbone change needed.
-- `detect_yolo_compat()` will then return two detections: `id=0` (top player) and `id=1` (bottom player)
+**Expected behavior after deploy:** DINO log will say `LoRA checkpoint detected` → `False` (no LoRA in the new checkpoint). Confs will vary per frame. Box positions will differ between player_1 and player_2 slots and track actual player locations.
 
-**Option B — Replace DINO player detection with MOG2+contour (no retraining):**
+**Option B — MOG2 fallback (use only if deployed DINO still fails):**
 - Port `detect_players()` and `assign_players_stable()` from `slayminton/scripts/visualizations.py` into a new file `models/player_mog2.py`
 - Replace `yolo.detect_yolo_compat(frame_bgr)` in `main.py` with calls to the MOG2 detector
 - MOG2 reliably finds two players from motion alone and assigns stable P1/P2 IDs
 - Downside: no confidence score, sensitive to camera shake, requires background stability
-- No retraining, deployable immediately
+- No retraining, deployable immediately — see Task 5-H for full implementation
 
-**Tell Haiku which option to implement when you have decided.**
+**Current decision: try checkpoint deploy first. Task 5-H (MOG2) is on standby.**
+
+---
+
+### Task 5-H: Implement MOG2 player detection — AUTHORIZED (2026-05-20)
+
+**Why:** Two-headed DINO retrain produced a collapsed model (confs constant, positions constant, ignores image content). Root cause is the LoRA shortcut memorizing the mean position. Rather than a third retraining attempt, replace the DINO player detection with the proven MOG2+contour approach from `slayminton/scripts/visualizations.py`.
+
+**Goal:** Two stable player tracks (P1=near side, P2=far side) without any neural network. Same output format as the existing DINO tracker so `main.py` wiring stays unchanged.
+
+---
+
+#### Step 1 — Create `models/player_mog2.py`
+
+Port these two functions verbatim from `slayminton/scripts/visualizations.py` then wrap them in a class:
+
+```python
+"""MOG2-based player detector. Drop-in replacement for DINOTracker.
+
+Detects players via background subtraction + connected-component analysis.
+Assigns stable P1 (near side, higher y) / P2 (far side, lower y) IDs by
+proximity to the previous frame's positions.
+"""
+from __future__ import annotations
+import cv2
+import numpy as np
+from typing import Dict, List, Optional, Tuple
+
+
+class MOG2PlayerDetector:
+    """Drop-in replacement for DINOTracker / PlayerDetector.
+
+    Public API matches DINOTracker:
+        detections = detector.detect(frame_bgr, timestamp)
+        # Returns {"players": [{"id":0,"bbox":(x,y,w,h),"conf":1.0}, ...]}
+    """
+
+    def __init__(
+        self,
+        min_area: int = 1500,          # minimum contour area (px²) to count as a player
+        history: int = 500,            # MOG2 history length
+        var_threshold: float = 16.0,   # MOG2 varThreshold
+        detect_shadows: bool = False,
+        dilate_iters: int = 2,
+        kernel_size: int = 5,
+    ):
+        self._mog2 = cv2.createBackgroundSubtractorMOG2(
+            history=history,
+            varThreshold=var_threshold,
+            detectShadows=detect_shadows,
+        )
+        self._kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+        )
+        self.min_area = min_area
+        self.dilate_iters = dilate_iters
+
+        # Stable ID state: (cx, cy) of P1 and P2 from last frame
+        self._prev: List[Optional[Tuple[float, float]]] = [None, None]
+
+    # ── Public API ──────────────────────────────────────────────────────────
+
+    def detect(
+        self, frame: np.ndarray, timestamp: float
+    ) -> Dict:
+        """
+        Args:
+            frame: BGR uint8 array, any resolution.
+            timestamp: frame timestamp in seconds (unused, kept for API compat).
+        Returns:
+            {"players": [{"id": int, "bbox": (x,y,w,h), "conf": 1.0}, ...]}
+            id=0 → P1 (near side, larger y centroid)
+            id=1 → P2 (far side, smaller y centroid)
+        """
+        blobs = self._detect_blobs(frame)
+        assigned = self._assign_stable(blobs, frame.shape[0])
+        detections = []
+        for pid, blob in enumerate(assigned):
+            if blob is not None:
+                x, y, w, h = blob
+                detections.append({"id": pid, "bbox": (x, y, w, h), "conf": 1.0})
+        return {"players": detections}
+
+    def reset(self) -> None:
+        """Re-initialise MOG2 (call at scene cuts / video restart)."""
+        self._mog2 = cv2.createBackgroundSubtractorMOG2(
+            history=500, varThreshold=16.0, detectShadows=False
+        )
+        self._prev = [None, None]
+
+    # ── Internal ────────────────────────────────────────────────────────────
+
+    def _detect_blobs(
+        self, frame: np.ndarray
+    ) -> List[Tuple[float, float, int, int, int, int]]:
+        """Return list of (cx, cy, x, y, w, h) for each player-sized blob."""
+        fg = self._mog2.apply(frame)
+        fg = cv2.dilate(fg, self._kernel, iterations=self.dilate_iters)
+        contours, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        blobs = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < self.min_area:
+                continue
+            x, y, w, h = cv2.boundingRect(cnt)
+            cx = x + w / 2
+            cy = y + h / 2
+            blobs.append((cx, cy, x, y, w, h))
+        return blobs
+
+    def _assign_stable(
+        self,
+        blobs: List[Tuple[float, float, int, int, int, int]],
+        frame_h: int,
+    ) -> List[Optional[Tuple[int, int, int, int]]]:
+        """
+        Assign P1 / P2 IDs with temporal stability via nearest-neighbour to
+        previous frame's centroids.  On cold start (no prev state), assign by
+        y-centroid: P1=larger y (near side), P2=smaller y (far side).
+
+        Returns [bbox_for_P1, bbox_for_P2] where each bbox = (x, y, w, h) or None.
+        """
+        if len(blobs) == 0:
+            return [None, None]
+
+        # Sort by y descending → blobs[0] is the player closest to the near baseline
+        blobs_sorted = sorted(blobs, key=lambda b: b[1], reverse=True)
+
+        if self._prev[0] is None and self._prev[1] is None:
+            # Cold start — assign by y order
+            result: List[Optional[Tuple[int,int,int,int]]] = [None, None]
+            if len(blobs_sorted) >= 1:
+                result[0] = blobs_sorted[0][2:]   # (x,y,w,h) of near player
+            if len(blobs_sorted) >= 2:
+                result[1] = blobs_sorted[1][2:]   # (x,y,w,h) of far player
+            # Update prev centroids
+            for pid in range(2):
+                if result[pid] is not None:
+                    bx, by, bw, bh = result[pid]
+                    self._prev[pid] = (bx + bw/2, by + bh/2)
+            return result
+
+        # Warm start — match blobs to previous positions by minimum Euclidean distance
+        result = [None, None]
+        used = set()
+        for pid in range(2):
+            if self._prev[pid] is None:
+                continue
+            px, py = self._prev[pid]
+            best_dist = float("inf")
+            best_idx = -1
+            for i, (cx, cy, bx, by, bw, bh) in enumerate(blobs):
+                if i in used:
+                    continue
+                dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = i
+            if best_idx >= 0:
+                used.add(best_idx)
+                bx, by, bw, bh = blobs[best_idx][2:]
+                result[pid] = (bx, by, bw, bh)
+                self._prev[pid] = (bx + bw/2, by + bh/2)
+
+        return result
+```
+
+---
+
+#### Step 2 — Wire into `main.py`
+
+Find the import and instantiation of the DINO tracker. Replace with MOG2.
+
+**In imports section** — add:
+```python
+from models.player_mog2 import MOG2PlayerDetector
+```
+
+**Find where `DINOTracker` (or `PlayerDetector`) is instantiated** — likely something like:
+```python
+player_detector = DINOTracker(cfg=cfg, ...)
+# OR
+player_detector = PlayerDetector(cfg=cfg, ...)
+```
+Replace with:
+```python
+player_detector = MOG2PlayerDetector(
+    min_area=int(getattr(cfg, "mog2_min_area", 1500)),
+    history=int(getattr(cfg, "mog2_history", 500)),
+)
+```
+
+Do NOT remove the old DINOTracker import yet — just add the new one and change the instantiation line. Leave the old import commented out so the engineer can switch back easily.
+
+**Verify the call site** — the detector is called somewhere like:
+```python
+result = player_detector.detect(frame_bgr, timestamp)
+players = result.get("players", [])
+```
+MOG2PlayerDetector returns the same dict format: `{"players": [{"id":0,"bbox":(x,y,w,h),"conf":1.0}, ...]}`. No other changes needed at the call site.
+
+---
+
+#### Step 3 — Add `mog2_min_area` and `mog2_history` to `config.yaml`
+
+Append to the bottom of `config.yaml`:
+```yaml
+# MOG2 player detection (Task 5-H)
+mog2_min_area: 1500     # minimum blob area in pixels^2; increase if ghost detections appear
+mog2_history: 500       # MOG2 background model history length
+```
+
+---
+
+#### Verification
+
+After the run check the SLURM log for player bounding boxes that move across frames. Expected: two bounding boxes visible in each frame where players are moving, with IDs stable across consecutive frames. If both players are detected but swapped, reduce `mog2_min_area` or adjust `history`.
+
+If the court is static (no camera movement) and players are moving, MOG2 should work within 20–50 warmup frames as the background model stabilises.
+
+---
+
+### Task 5-I: Shuttle circle size — APPLIED DIRECTLY (2026-05-20)
+
+`box_size` reduced from 16 → 7 heatmap pixels, plus a hard cap of 22px in video space so it cannot balloon on high-resolution input. At 720p (scale=2.5×), this gives a 17.5px display box — roughly shuttle-sized. Applied directly in `models/shuttle_tracknetv3.py`. Haiku: do NOT re-touch these values.
+
+---
+
+### Task 5-J: Viewer glitches and slowdowns — diagnostic notes
+
+These are the likely causes of the "repetitive glitches and slowdowns" the engineer observes. Haiku should NOT attempt to fix these without explicit instruction — documenting here so the engineer can decide what to address.
+
+**Cause 1 — DINO interval-3 box caching:** Player boxes are only updated every 3 frames and the cached box is teleported to the new position instantly (no interpolation). When a player moves fast, the box jumps ~3 frames of distance at once. Fix: bilinear interpolation of (cx,cy) between cached positions, or increase DINO inference frequency (costs ~18ms/frame extra).
+
+**Cause 2 — TrackNetV3 8-frame warmup gap:** The 8-frame sliding buffer must fill before any shuttle detection. For the first 8 frames (≈0.27s at 30fps), `detect()` returns `None`. If the viewer renders the shuttle from the last valid detection, it holds at the last position. If it clears it, the shuttle disappears then reappears — this is a visual glitch. Fix: hold the last valid detection for at most 2 frames, then hide.
+
+**Cause 3 — cv2.cvtColor + background resize on every frame in `_run_tracknet()`:** The background is re-BGR→RGB-converted and resized from original resolution every single frame, even though the background never changes. Move the background pre-processing out of `_run_tracknet()` and into `set_background()` — compute `self._background_t: torch.Tensor` once, reuse every frame.
+
+**Cause 4 — DearPyGui texture upload stall:** `dpg.set_value(texture_tag, ...)` blocks the main thread until the GPU texture transfer completes. If frame decoding is slow (I/O stall, codec delay), this causes visible frame drops. Fix: decode frames on a background thread and put them in a queue; the viewer thread only uploads pre-decoded frames.
+
+**Priority recommendation:** Fix Cause 3 first (zero risk, clear speedup). Then Cause 2 (easy, visual improvement). Causes 1 and 4 require more refactoring.
+
+---
+
+### Deployment reminder — new DINO checkpoint never loaded (2026-05-20) ⚠️ DO THIS FIRST
+
+The retrained two-headed checkpoint (mAP=0.9351, val_iou=0.7531) is at `data/output/dino_player_2player.pt`. It has never been tested at inference. The SLURM copy step used the wrong source path and silently skipped. The pipeline still loads `models/dino_player.pt` = old one-headed LoRA checkpoint.
+
+**Before running another tracking job:**
+```bash
+cp data/output/dino_player_2player.pt models/dino_player.pt
+```
+And in `models/player_dino.py`:
+```python
+TRACKED_CLASSES = ("player_1", "player_2")   # was ("player",)
+```
+This is the highest-priority unblocked action in the entire pipeline.
