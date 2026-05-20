@@ -297,11 +297,13 @@ class DINOTracker(nn.Module):
         x = self.preprocess(pil).unsqueeze(0).to(self.device)
         use_amp = (self.device.type == "cuda")
         with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
-            pred = self.forward_detect(x)[0].cpu()  # (10,) for two players
+            pred = self.forward_detect(x).cpu()  # (1, 2, 5)
 
         outputs: Dict[str, Optional[List[Tuple[float, float, float, float, float]]]] = {}
 
-        # Parse two player detections: [conf1, cx1, cy1, w1, h1, conf2, cx2, cy2, w2, h2]
+        # Parse two player detections: reshape (1, 2, 5) → (10,)
+        pred = pred[0].reshape(-1)  # (2, 5) → (10,)
+
         players = []
         for i in range(len(TRACKED_CLASSES)):
             offset = i * 5
