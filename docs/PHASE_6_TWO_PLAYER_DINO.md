@@ -100,8 +100,8 @@ Annotations:
 - `models/shuttle_tracknetv3.py` — Heatmap upscaling fix
 - `models/player_dino.py` — Two-player architecture + dataset parsing
 
-### Files Created
-- `slurm_train_2player.sh` — SLURM job script (ready to submit)
+### Files Created/Modified
+- `slurm_train.sh` — Added new `train-dino-2player` mode (replaces separate script)
 - `test_2player_arch.py` — Validation script (local testing)
 - `run_test.sh` — Environment loader for local testing
 
@@ -135,7 +135,7 @@ Checks:
 
 ### 3. Submit Training
 ```bash
-sbatch slurm_train_2player.sh
+sbatch --gres=gpu:1 --mem=32G --export=MODE=train-dino-2player slurm_train.sh
 ```
 
 **Configuration**:
@@ -143,10 +143,10 @@ sbatch slurm_train_2player.sh
 - GPU: 1 (A100 or similar)
 - Memory: 32GB
 - Batch size: 16
-- Epochs: 75
+- Epochs: 75 (default)
 - Optimizer: AdamW (lr=5e-4, weight_decay=1e-4)
 - LR schedule: Cosine annealing
-- Fine-tuning: LoRA (r=4)
+- Fine-tuning: LoRA enabled by default (r=4)
 
 **Output**: `data/output/dino_player_2player.pt`
 
@@ -156,7 +156,7 @@ sbatch slurm_train_2player.sh
 squeue -u zshen38
 
 # Watch logs
-tail -f logs/train_2player_*.log
+tail -f data/output/logs/slurm-*.out
 ```
 
 ---

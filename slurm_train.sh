@@ -1,7 +1,7 @@
 #!/bin/bash
 # SLURM launcher for badminton_vision training.
 #
-# Modes: train-tracknet | train-yolo | train-stroke | train-dino
+# Modes: train-tracknet | train-yolo | train-stroke | train-dino | train-dino-2player
 # For inference, use slurm_track.sh instead.
 # Phase 4-E: train-stroke now supports multi-frame pose sequences (T=7 temporal context)
 #
@@ -21,6 +21,11 @@
 #   # DINOv3 with LoRA fine-tuning (faster, lower memory)
 #   sbatch --gres=gpu:1 --mem=48G \
 #     --export=MODE=train-dino,TRAIN_DIR=data/input/train/player,EPOCHS=50,BATCH_SIZE=16,LR=5e-4,USE_LORA=1,LORA_R=4,LORA_ALPHA=8 \
+#     slurm_train.sh
+#
+#   # DINOv3 two-player tracking (Phase 6, 1 GPU)
+#   sbatch --gres=gpu:1 --mem=32G \
+#     --export=MODE=train-dino-2player \
 #     slurm_train.sh
 #
 #   # 2 GPUs, default partition (TrackNet)
@@ -285,9 +290,118 @@ ENDPYTHON
         fi
         ;;
 
+    train-dino-2player)
+        echo "[SLURM] Training DINOv3 two-player detector (Phase 6)"
+        # Two-player tracking: track both players simultaneously
+        # Detects 2 players (top + bottom) per frame
+        # Uses data/input/train/player2 dataset (9911 images with 2 people each)
+        TRAIN_DIR="${TRAIN_DIR:-data/input/train/player2}"
+        CHECKPOINT_NAME="${CHECKPOINT_NAME:-dino_player_2player.pt}"
+
+        echo "[SLURM]   Train dir:         ${TRAIN_DIR}"
+        echo "[SLURM]   Output dir:        ${OUTPUT_DIR}"
+        echo "[SLURM]   Checkpoint:        ${CHECKPOINT_NAME}"
+        echo "[SLURM]   Epochs:            ${EPOCHS}"
+        echo "[SLURM]   Batch size:        ${BATCH_SIZE}"
+        echo "[SLURM]   Learning rate:     ${LR}"
+        echo "[SLURM]   Use LoRA:          ${USE_LORA:-1}"
+        if [[ "${USE_LORA:-1}" == "1" ]]; then
+            echo "[SLURM]   LoRA r:            ${LORA_R:-4}"
+            echo "[SLURM]   LoRA alpha:        ${LORA_ALPHA:-8}"
+        fi
+        echo "[SLURM]   Num workers:       ${NUM_WORKERS}"
+
+        # Verify training data exists
+        if [[ ! -d "${TRAIN_DIR}" ]]; then
+            echo "[SLURM] ERROR: TRAIN_DIR does not exist: ${TRAIN_DIR}"
+            exit 1
+        fi
+
+        ANNOTATIONS_FILE="${TRAIN_DIR}/_annotations.coco.json"
+        if [[ ! -f "${ANNOTATIONS_FILE}" ]]; then
+            echo "[SLURM] ERROR: COCO annotations file not found: ${ANNOTATIONS_FILE}"
+            exit 1
+        fi
+
+        # Create output directory
+        mkdir -p "${OUTPUT_DIR}"
+
+        # Build Python training script (inline to avoid shell escaping issues)
+        ${PYTHON_CMD} << 'ENDPYTHON'
+import sys
+import os
+from models.player_dino import DINODataset, train_dino
+
+train_dir = os.environ.get("TRAIN_DIR", "data/input/train/player2")
+annotations_file = os.path.join(train_dir, "_annotations.coco.json")
+output_dir = os.environ.get("OUTPUT_DIR", "data/output")
+epochs = int(os.environ.get("EPOCHS", "75"))
+batch_size = int(os.environ.get("BATCH_SIZE", "16"))
+lr = float(os.environ.get("LR", "5e-4"))
+checkpoint_name = os.environ.get("CHECKPOINT_NAME", "dino_player_2player.pt")
+use_lora = os.environ.get("USE_LORA", "1") == "1"
+lora_r = int(os.environ.get("LORA_R", "4"))
+lora_alpha = int(os.environ.get("LORA_ALPHA", "8"))
+freeze_backbone_epochs = int(os.environ.get("FREEZE_BACKBONE_EPOCHS", "0"))
+pretrained_backbone = os.environ.get("PRETRAINED_BACKBONE", "")
+log_every = int(os.environ.get("LOG_EVERY", "10"))
+num_workers = int(os.environ.get("NUM_WORKERS", "4"))
+
+print(f"[TRAIN] Phase 6: Two-player DINOv3 detector")
+print(f"[TRAIN] Loading dataset from: {train_dir}")
+dataset = DINODataset(
+    device="cuda",
+    data_dir=train_dir,
+    annotations_file=annotations_file
+)
+print(f"[TRAIN] Loaded {len(dataset)} images")
+
+# Verify two-player architecture
+from models.player_dino import TRACKED_CLASSES
+print(f"[TRAIN] TRACKED_CLASSES: {TRACKED_CLASSES}")
+assert len(TRACKED_CLASSES) == 2, f"Expected 2 classes for two-player, got {len(TRACKED_CLASSES)}"
+
+print("[TRAIN] Starting two-player DINOv3 training...")
+model, history = train_dino(
+    student=None,
+    dataset=dataset,
+    device="cuda",
+    epochs=epochs,
+    batch_size=batch_size,
+    learning_rate=lr,
+    output_dir=output_dir,
+    checkpoint_name=checkpoint_name,
+    pretrained_backbone_path=pretrained_backbone if pretrained_backbone else None,
+    freeze_backbone_epochs=freeze_backbone_epochs,
+    use_lora=use_lora,
+    lora_r=lora_r,
+    lora_alpha=lora_alpha,
+    num_workers=num_workers,
+    log_every=log_every,
+)
+
+print("[TRAIN] Training complete!")
+print(f"[TRAIN] Checkpoint saved to: {os.path.join(output_dir, checkpoint_name)}")
+if history.val_loss:
+    print(f"[TRAIN] Final val_loss: {history.val_loss[-1]:.4f}")
+if history.val_iou:
+    print(f"[TRAIN] Final val_iou:  {history.val_iou[-1]:.4f}")
+ENDPYTHON
+        # Copy checkpoint to models/ so inference scripts find it at models/dino_player_2player.pt
+        mkdir -p models
+        _src="${OUTPUT_DIR}/${CHECKPOINT_NAME}"
+        _dst="models/${CHECKPOINT_NAME}"
+        if [[ -f "${_src}" ]]; then
+            cp "${_src}" "${_dst}"
+            echo "[SLURM] Copied checkpoint: ${_src} → ${_dst}"
+        else
+            echo "[SLURM] WARNING: checkpoint not found at ${_src}; skipping copy"
+        fi
+        ;;
+
     *)
         echo "[SLURM] ERROR: Unknown MODE '${MODE}'"
-        echo "  Valid modes: train-tracknet | train-yolo | train-stroke | train-dino"
+        echo "  Valid modes: train-tracknet | train-yolo | train-stroke | train-dino | train-dino-2player"
         echo "  For inference, use slurm_track.sh instead."
         exit 1
         ;;
