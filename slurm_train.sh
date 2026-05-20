@@ -28,6 +28,11 @@
 #     --export=MODE=train-dino-2player \
 #     slurm_train.sh
 #
+#   # DINOv3 two-player tracking with fixes (May 2026, 100 epochs)
+#   sbatch --gres=gpu:1 --mem=32G \
+#     --export=MODE=train-dino-2player,EPOCHS=100 \
+#     slurm_train.sh
+#
 #   # 2 GPUs, default partition (TrackNet)
 #   sbatch --export=MODE=train-tracknet slurm_train.sh
 #
@@ -294,7 +299,18 @@ ENDPYTHON
         echo "[SLURM] Training DINOv3 two-player detector (Phase 6)"
         # Two-player tracking: track both players simultaneously
         # Detects 2 players (top + bottom) per frame
-        # Uses data/input/train/player2 dataset (9911 images with 2 people each)
+        # Uses data/input/train/player2 dataset (10,259 images with ~4 objects each)
+        #
+        # FIXES APPLIED (May 2026):
+        #   1. Numerically stable loss: binary_cross_entropy_with_logits (prevents 0.99 lockout)
+        #   2. Balanced loss weights: BOX_LOSS_WEIGHT = 0.5 (was 0.05)
+        #   3. New forward_detect_logits() method for training stability
+        # See docs/DINO_FIXES.md for details
+        #
+        # Recommended usage:
+        #   sbatch --gres=gpu:1 --mem=32G \
+        #     --export=MODE=train-dino-2player,EPOCHS=100 \
+        #     slurm_train.sh
         TRAIN_DIR="${TRAIN_DIR:-data/input/train/player2}"
         CHECKPOINT_NAME="${CHECKPOINT_NAME:-dino_player_2player.pt}"
 

@@ -46,7 +46,7 @@ WEIGHT_DECAY = 1e-4
 MIN_CONFIDENCE = 0.25
 VAL_EVERY = 1
 VAL_IOU_THRESHOLD = 0.5
-BOX_LOSS_WEIGHT = 0.05
+BOX_LOSS_WEIGHT = 0.5  # Increased from 0.05 to balance conf vs box loss
 
 TRACKED_CLASSES = ("player_1", "player_2")  # Two-player detection
 
@@ -177,6 +177,22 @@ class DINOTracker(nn.Module):
         conf = torch.sigmoid(raw[..., :1])
         box = torch.sigmoid(raw[..., 1:])
         return torch.cat([conf, box], dim=-1)
+
+    def forward_detect_logits(self, x: torch.Tensor) -> torch.Tensor:
+        """Detection forward pass returning raw logits (for training with BCE-with-logits).
+
+        Args:
+            x: Tensor (B, 3, H, W)
+
+        Returns:
+            Tensor (B, num_classes, 5) with [conf_logits, box_logits] unbounded
+        """
+        feat = self.encode(x)
+        raw = self.detector_head(feat).view(x.size(0), len(TRACKED_CLASSES), 5)
+        # Return unbounded logits: no sigmoid applied
+        # Confidence logits: raw output
+        # Box logits: raw output (will be sigmoidized separately in loss)
+        return raw
 
     def load_checkpoint(self, path: str) -> None:
         """Load checkpoint (supports both raw state_dict and wrapped format).
@@ -736,16 +752,21 @@ def train_dino(
 
             det_images = _ensure_multiple(det_images, patch_H)
 
-            # Forward pass (detection only)
-            pred = student_model.forward_detect(det_images)
+            # Forward pass (detection only) - use logits for stable loss calculation
+            pred_logits = student_model.forward_detect_logits(det_images)
+            pred = student_model.forward_detect(det_images)  # Also get sigmoid'd for potential logging
 
             # Loss: confidence + box regression
-            conf_pred = pred[..., 0]
-            box_pred = pred[..., 1:]
+            # Use RAW confidence logits for BCE-with-logits (numerically stable)
+            conf_logits = pred_logits[..., 0]
+            box_pred = pred[..., 1:]  # Use sigmoid'd boxes (L1 loss doesn't require logits)
+            
             conf_target = det_targets[..., 0]
             box_target = det_targets[..., 1:]
 
-            conf_loss = F.binary_cross_entropy(conf_pred, conf_target)
+            # CRITICAL FIX: Use binary_cross_entropy_with_logits instead of binary_cross_entropy
+            # This is numerically stable and prevents gradient issues when confidence → 1.0
+            conf_loss = F.binary_cross_entropy_with_logits(conf_logits, conf_target)
             box_loss = F.l1_loss(box_pred, box_target, reduction="none")
             box_loss = (box_loss.sum(dim=-1) * conf_target).sum() / conf_target.sum().clamp(min=1.0)
             loss = conf_loss + BOX_LOSS_WEIGHT * box_loss

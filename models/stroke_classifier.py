@@ -19,8 +19,8 @@ class StrokeClassifier:
         cfg: SimpleNamespace from load_config().
     """
 
-    # Stroke type labels (foundational actions)
-    STROKE_TYPES = ["clear", "drop", "smash", "net", "drive", "lift", "lob", "serve"]
+    # Stroke type labels (foundational actions from FineBadminton20k dataset)
+    STROKE_TYPES = ["clear", "smash", "net", "drive", "serve"]
     TACTICAL_LABELS = ["attack", "defense", "neutral_tactic", "setup", "exploit", "unclear"]
     DECISION_LABELS = ["good", "neutral", "poor"]
 

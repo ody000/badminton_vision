@@ -4,7 +4,7 @@ Architecture:
   - Linear projection: input_dim -> d_model (128)
   - TransformerEncoder: 2 layers, 4 heads, d_model=128
   - Three classification heads:
-      foundational_actions: 8 classes (clear, drop, smash, net, drive, lift, lob, serve)
+      foundational_actions: 5 classes (clear, smash, net, drive, serve)
       tactical_semantic:    6 classes
       decision_eval:        3 classes (good, neutral, poor)
 
@@ -18,8 +18,8 @@ import torch
 import torch.nn as nn
 
 
-# Class counts
-N_FOUNDATIONAL = 8   # clear, drop, smash, net, drive, lift, lob, serve
+# Class counts (must match training data)
+N_FOUNDATIONAL = 5   # clear, smash, net, drive, serve (as in FineBadminton20k dataset)
 N_TACTICAL = 6
 N_DECISION = 3       # good, neutral, poor
 

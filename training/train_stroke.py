@@ -12,7 +12,7 @@ Supports two data formats, auto-detected from the directory:
     "foundational_action" and optionally "features".
 
 In both cases the three FineBadminton label levels are used:
-  - foundational_actions (8 classes) — primary training target
+  - foundational_actions (5 classes) — primary training target
   - tactical_semantic    (6 classes) — auxiliary head
   - decision_evaluation  (3 classes) — auxiliary head
 
@@ -41,7 +41,9 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 
-FOUNDATIONAL_ACTIONS = ["clear", "drop", "smash", "net", "drive", "lift", "lob", "serve"]
+# FineBadminton20k dataset contains only these 5 foundational actions
+# (not drop, lift, lob which were in the original 8-class schema)
+FOUNDATIONAL_ACTIONS = ["clear", "smash", "net", "drive", "serve"]
 TACTICAL_LABELS      = ["attack", "defense", "neutral_tactic", "setup", "exploit", "unclear"]
 DECISION_LABELS      = ["good", "neutral", "poor"]
 
