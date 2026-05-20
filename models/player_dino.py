@@ -181,7 +181,15 @@ class DINOTracker(nn.Module):
         state = torch.load(path, map_location=self.device)
         if isinstance(state, dict) and "model" in state:
             state = state["model"]
-        self.load_state_dict(state, strict=False)
+        result = self.load_state_dict(state, strict=False)
+        n_loaded = len(state) - len(result.missing_keys) if isinstance(state, dict) else "?"
+        n_missing = len(result.missing_keys)
+        n_unexpected = len(result.unexpected_keys)
+        print(f"[DINOTracker] Loaded checkpoint from {path} "
+              f"(keys loaded≈{n_loaded}, missing={n_missing}, unexpected={n_unexpected})")
+        if n_missing:
+            print(f"[DINOTracker]   missing: {result.missing_keys[:5]}"
+                  f"{'...' if n_missing > 5 else ''}")
 
     def save_checkpoint(self, path: str) -> None:
         """Save checkpoint."""

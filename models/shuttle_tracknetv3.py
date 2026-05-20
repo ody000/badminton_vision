@@ -81,13 +81,24 @@ class TrackNetV3Tracker:
         # Background image (H, W, 3) uint8 — set via set_background() or constructor
         self._background: np.ndarray | None = background
 
-        # Load TrackNet V3
-        self.tracknet = _TrackNetV3Arch(in_channels=SEQ_LEN * 3 + 3, out_channels=1)
+        # Load TrackNet V3.
+        # out_channels must match the pretrained checkpoint: one heatmap per input
+        # frame in the 8-frame window (SEQ_LEN).  Using out_channels=1 would make
+        # the final predictor Conv2d shape incompatible with the checkpoint, and
+        # strict=False would silently leave it randomly initialized → the model
+        # outputs garbage from a biased random head (appears to "track" a fixed corner).
+        self.tracknet = _TrackNetV3Arch(in_channels=SEQ_LEN * 3 + 3, out_channels=SEQ_LEN)
         if tracknet_path and os.path.exists(tracknet_path):
             state = torch.load(tracknet_path, map_location="cpu")
             sd = state.get("state_dict", state) if isinstance(state, dict) else state
-            self.tracknet.load_state_dict(sd, strict=False)
-            print(f"[TRACKNETV3] Loaded TrackNet from {tracknet_path}")
+            result = self.tracknet.load_state_dict(sd, strict=False)
+            n_missing = len(result.missing_keys)
+            n_unexpected = len(result.unexpected_keys)
+            print(f"[TRACKNETV3] Loaded TrackNet from {tracknet_path} "
+                  f"(missing={n_missing}, unexpected={n_unexpected})")
+            if n_missing:
+                print(f"[TRACKNETV3]   missing keys: {result.missing_keys[:5]}"
+                      f"{'...' if n_missing > 5 else ''}")
         else:
             print(f"[TRACKNETV3] Warning: TrackNet weights not found at {tracknet_path}")
         self.tracknet.to(self.device).eval()
@@ -176,8 +187,11 @@ class TrackNetV3Tracker:
 
         use_amp = (self.device.type == "cuda")
         with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
-            heatmap = self.tracknet(inp)  # (1, 1, H, W)
-        heatmap = heatmap.float().squeeze()  # (H, W)
+            heatmap_all = self.tracknet(inp)  # (1, SEQ_LEN, H, W)
+        # Take the last channel: prediction for the most recent (current) frame.
+        # The V3 model outputs one heatmap per input frame; channel [-1] corresponds
+        # to the frame that was just added to the buffer.
+        heatmap = heatmap_all.float()[0, -1]  # (H, W)
 
         conf = float(heatmap.max().item())
         if conf < self.conf_threshold:
