@@ -177,10 +177,33 @@ class DINOTracker(nn.Module):
         return torch.cat([conf, box], dim=-1)
 
     def load_checkpoint(self, path: str) -> None:
-        """Load checkpoint (supports both raw state_dict and wrapped format)."""
+        """Load checkpoint (supports both raw state_dict and wrapped format).
+
+        Also handles LoRA-trained checkpoints: if the saved state dict contains
+        LoRA keys (*.lora_A / *.lora_B), LoRA is applied to the encoder
+        automatically before loading so the key names match.
+        """
         state = torch.load(path, map_location=self.device)
         if isinstance(state, dict) and "model" in state:
             state = state["model"]
+
+        # Detect LoRA checkpoint: look for any key ending in 'lora_A' or 'lora_B'
+        is_lora_ckpt = isinstance(state, dict) and any(
+            k.endswith("lora_A") or k.endswith("lora_B") for k in state
+        )
+        already_has_lora = any(isinstance(m, LoRALinear) for m in self.modules())
+
+        if is_lora_ckpt and not already_has_lora:
+            # Infer r from the first lora_A tensor shape: (in_features, r)
+            lora_r = 4
+            for k, v in state.items():
+                if k.endswith("lora_A") and isinstance(v, torch.Tensor) and v.ndim == 2:
+                    lora_r = int(v.shape[1])
+                    break
+            n = apply_lora_to_encoder(self.encoder, r=lora_r)
+            print(f"[DINOTracker] LoRA checkpoint detected (r={lora_r}); "
+                  f"applied LoRA to {n} encoder layers before loading")
+
         result = self.load_state_dict(state, strict=False)
         n_loaded = len(state) - len(result.missing_keys) if isinstance(state, dict) else "?"
         n_missing = len(result.missing_keys)

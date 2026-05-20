@@ -90,7 +90,18 @@ class TrackNetV3Tracker:
         self.tracknet = _TrackNetV3Arch(in_channels=SEQ_LEN * 3 + 3, out_channels=SEQ_LEN)
         if tracknet_path and os.path.exists(tracknet_path):
             state = torch.load(tracknet_path, map_location="cpu")
-            sd = state.get("state_dict", state) if isinstance(state, dict) else state
+            # The official TrackNetV3 checkpoint uses the key 'param' for the
+            # state dict.  Try several common keys before falling back to the raw
+            # dict so we never accidentally pass top-level metadata keys (epoch,
+            # optim, loss…) as layer names.
+            if isinstance(state, dict):
+                sd = (state.get("param")
+                      or state.get("state_dict")
+                      or state.get("model_state_dict")
+                      or state.get("model")
+                      or state)
+            else:
+                sd = state
             result = self.tracknet.load_state_dict(sd, strict=False)
             n_missing = len(result.missing_keys)
             n_unexpected = len(result.unexpected_keys)
