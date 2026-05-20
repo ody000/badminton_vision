@@ -270,7 +270,12 @@ class DINOTracker(nn.Module):
                 pil = Image.fromarray(frame_rgb.astype(np.uint8))
                 orig_h, orig_w = frame.shape[:2]
             elif frame.ndim == 3:
-                pil = Image.fromarray(frame.astype(np.uint8))
+                # Training loads images via PIL (RGB).  OpenCV frames are BGR.
+                # Convert BGR→RGB before PIL so inference uses the same channel
+                # order the model was trained on.  Without this, R and B channels
+                # are swapped for every inference frame, reducing detection accuracy.
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil = Image.fromarray(frame_rgb.astype(np.uint8))
                 orig_h, orig_w = frame.shape[:2]
             else:
                 raise ValueError("Expected frame as HxW or HxWx3")
@@ -293,6 +298,15 @@ class DINOTracker(nn.Module):
 
         outputs: Dict[str, Optional[Tuple[float, float, float, float, float]]] = {}
         conf = float(pred[0, 0].item())
+
+        # TEMPORARY DIAGNOSTIC — remove after first confirmed run (Task 5-D)
+        if not hasattr(self, '_diag_count'):
+            self._diag_count = 0
+        if self._diag_count < 10:
+            self._diag_count += 1
+            box_raw = pred[0, 1:].tolist()
+            print(f"[DINO DIAG] frame≈{self._diag_count} conf={conf:.4f} "
+                  f"box_norm={[round(v,3) for v in box_raw]}")
 
         if conf < min_confidence:
             outputs["player"] = None

@@ -290,3 +290,157 @@ Priority 0 fix alone recovers ~98% of lost time. All other optimizations are inc
 2. **Short-term** (Phase 2): Download V3 weights, test on sample videos, consider fine-tuning if needed
 3. **Medium-term** (Phase 4): Run stroke retraining once multi-frame data collection confirmed
 4. **Fallback** (Phase 3): Use only if V3 integration encounters blockers
+
+---
+
+## Phase 5 — Addendum: Confirmed Root Causes and Applied Fixes (2026-05-20)
+
+Phase 5 was implemented by Haiku but the bugs persisted. The Phase 5 root-cause analysis was directionally correct but did not identify the exact lines to change. After a second diagnostic pass the following two root causes were confirmed and the fixes were applied directly to the source files.
+
+---
+
+### Bug 5-A (TrackNet) — Confirmed Fix: Background channel order was backwards
+
+**What Phase 5 said:** Multiple candidate causes including BN transposition, argmax on flat map, BGR/RGB. All reasonable but all wrong.
+
+**Actual root cause:** `models/shuttle_tracknetv3.py`, `_run_tracknet()`. The 27-channel input tensor was assembled as `[frames_t (24ch), bg_t (3ch)]` — frames first, background last. The qaz812345 pretrained weights were trained with `bg_mode='concat'` which puts background **first** (channels 0–2), followed by 8 video frames (channels 3–26). Confirmed from `train.py` line:
+```python
+elif param_dict['bg_mode'] == 'concat':
+    x = to_img_format(x, num_ch=3)
+    x = x[:, 1:, :, :, :]   # skips index 0 = background frame
+```
+Every convolutional filter trained to process background features was receiving the oldest video frame instead. The heatmap had no real shuttle peak — argmax landed consistently on the same static background structure.
+
+**Fix applied (already in code):**
+```python
+# models/shuttle_tracknetv3.py
+# BEFORE:
+inp = torch.cat([frames_t, bg_t], dim=0).unsqueeze(0)
+# AFTER:
+inp = torch.cat([bg_t, frames_t], dim=0).unsqueeze(0)  # bg first — matches pretrained weights
+```
+
+**No retraining required.** This is a pure inference fix.
+
+---
+
+### Bug 5-B (DINO) — Confirmed Fix: BGR frame fed to RGB-trained model
+
+**What Phase 5 said:** Checkpoint key prefix mismatch causing head not to load. Haiku added prefix stripping and the head loaded correctly (weight 0.031, missing=0). The box-stuck-at-center problem remained.
+
+**Actual root cause:** `models/player_dino.py`, `detect()`. Training loads images via `Image.open(img_path).convert("RGB")` — always RGB. Inference received raw OpenCV frames (BGR) and passed them directly to `Image.fromarray(frame.astype(np.uint8))` without channel conversion. PIL's `fromarray` treats the array as RGB regardless of the actual channel order, so every inference frame had R and B channels swapped relative to the training distribution. The ViT backbone produces systematically incorrect feature embeddings, degrading box regression.
+
+**Fix applied (already in code):**
+```python
+# models/player_dino.py, detect(), ndim==3 branch
+# BEFORE:
+pil = Image.fromarray(frame.astype(np.uint8))
+# AFTER:
+frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+pil = Image.fromarray(frame_rgb.astype(np.uint8))
+```
+
+**No retraining required.**
+
+**Remaining structural limitation — NOT a code bug:** `TRACKED_CLASSES = ("player",)` means the model outputs a single bounding box per frame. With two players on court, the ViT [CLS] token aggregates features from both, and the detection head predicts a compromise position (near frame centre). This is why the box "wobbles at centre" even after the BGR fix improves the encoder's features. Fixing this properly requires either:
+- Retraining with `TRACKED_CLASSES = ("player_top", "player_bottom")` and a 2-head detector
+- OR falling back to the MOG2+contour player detection from `slayminton/scripts/visualizations.py` which tracks two players reliably without retraining
+
+Haiku should NOT attempt to fix this without explicit instruction — it requires a training decision.
+
+---
+
+### Bug 5-C (Heatmap) — Cascades resolved by 5-A fix
+
+The bare heatmap was entirely downstream of Bug 5-A: with TrackNet stuck on background, every shuttle position was constant → no trajectory → 0 hit events → no meaningful court positions to accumulate. After the 5-A background-order fix, TrackNet will produce real shuttle trajectories and hit events will fire, giving the heatmap real data to accumulate.
+
+The `feet_px` vs `feet` aliasing fix from Phase 5-C (Cause B) was also correctly applied by Haiku and should remain in place.
+
+---
+
+## Phase 5 — Remaining Work for Haiku
+
+> **Context for Haiku:** Two fixes have already been applied directly to the source files by the senior engineer. Do NOT re-apply them. The remaining work below is what still needs doing. Read each task carefully — some are code changes, some require a human decision first (marked ⚠️).
+
+---
+
+### Task 5-D: Add diagnostic prints to verify the two applied fixes actually work on the next run
+
+**Files:** `models/shuttle_tracknetv3.py`, `models/player_dino.py`
+
+Add temporary one-time diagnostics that print on the first N frames so the engineer can confirm in the SLURM log that the fixes are working before running on the full video. Remove them once confirmed.
+
+**In `shuttle_tracknetv3.py`, inside `_run_tracknet()`, after computing `conf`:**
+
+```python
+# TEMPORARY DIAGNOSTIC — remove after first confirmed run
+if self._frame_count <= 20:
+    flat_idx = int(heatmap.argmax().item())
+    py, px = divmod(flat_idx, W)
+    print(f"[TRACKNETV3 DIAG] frame={self._frame_count} "
+          f"heatmap_max={conf:.4f} heatmap_mean={float(heatmap.mean()):.4f} "
+          f"argmax_px=({px},{py})")
+```
+
+Expected after fix: `heatmap_max` varies frame-to-frame (not constant), `argmax_px` moves around (not fixed at one corner or centre). If `heatmap_max` is consistently < 0.5 across all frames the conf_threshold may need lowering to `0.3` in `config.yaml`.
+
+**In `models/player_dino.py`, inside `detect()`, after `conf = float(pred[0, 0].item())`:**
+
+```python
+# TEMPORARY DIAGNOSTIC — remove after first confirmed run
+if not hasattr(self, '_diag_count'):
+    self._diag_count = 0
+if self._diag_count < 10:
+    self._diag_count += 1
+    box_raw = pred[0, 1:].tolist()
+    print(f"[DINO DIAG] frame≈{self._diag_count} conf={conf:.4f} "
+          f"box_norm={[round(v,3) for v in box_raw]}")
+```
+
+Expected after fix: `box_norm` cx and cy values are NOT consistently 0.45–0.55. They should vary and point to actual player regions (top or bottom half of frame for a typical overhead camera). If cx/cy are still near 0.5, the single-head structural limitation is dominant and retraining is required (see Task 5-F).
+
+---
+
+### Task 5-E: Add diagnostic print for hit events in `main.py`
+
+**Why:** The SLURM log showed 0 hit events across 3790 frames. After the TrackNet fix this should no longer be zero. Add a running counter so the engineer can see hits accumulating in the log.
+
+**File:** `main.py`, inside `_emit_stroke_event()`, at the top of the function body:
+
+```python
+print(f"[HIT] frame={frame_idx} ts={timestamp:.3f}s player={hit_player_id} "
+      f"stroke={stroke_result.get('stroke_type')} conf={stroke_result.get('confidence',0):.3f}")
+```
+
+Also add at the end of `run()`, just before writing `tracking_results.json`:
+
+```python
+print(f"[MAIN] Hit events detected: {len(events)} across {frames_processed} frames "
+      f"({len(events)/max(frames_processed,1)*30*60:.1f} hits/min at 30fps)")
+```
+
+Expected: at least 10–40 hits/min in a real badminton match. If still 0, the hit detector's input (shuttle trajectory) is still broken — re-check TrackNet output with Task 5-D diagnostics.
+
+---
+
+### Task 5-F ⚠️ REQUIRES HUMAN DECISION BEFORE IMPLEMENTING
+
+**Problem:** `TRACKED_CLASSES = ("player",)` is a single detection head that outputs one bounding box per frame. With two players on court the head predicts a compromise position near frame centre. This is a training-time architectural limitation — no code fix can resolve it without either retraining or replacing the detection method.
+
+**Two options — do NOT implement either without explicit instruction from the engineer:**
+
+**Option A — Retrain with dual-class head (recommended if GPU time is available):**
+- Change `TRACKED_CLASSES = ("player_top", "player_bottom")` in `models/player_dino.py`
+- The detection head output changes from `(B, 1, 5)` to `(B, 2, 5)`
+- Dataset labels need to be split by y-centroid: player with `cy < frame_h/2` → `player_top`, otherwise `player_bottom`
+- Retrain for 75 epochs. Expected training time: 4–6h on A100. No backbone change needed.
+- `detect_yolo_compat()` will then return two detections: `id=0` (top player) and `id=1` (bottom player)
+
+**Option B — Replace DINO player detection with MOG2+contour (no retraining):**
+- Port `detect_players()` and `assign_players_stable()` from `slayminton/scripts/visualizations.py` into a new file `models/player_mog2.py`
+- Replace `yolo.detect_yolo_compat(frame_bgr)` in `main.py` with calls to the MOG2 detector
+- MOG2 reliably finds two players from motion alone and assigns stable P1/P2 IDs
+- Downside: no confidence score, sensitive to camera shake, requires background stability
+- No retraining, deployable immediately
+
+**Tell Haiku which option to implement when you have decided.**

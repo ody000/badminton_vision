@@ -194,7 +194,14 @@ class TrackNetV3Tracker:
             bg_t = torch.zeros(3, H, W)
 
         # Concatenate: (27, H, W)
-        inp = torch.cat([frames_t, bg_t], dim=0).unsqueeze(0).to(self.device)  # (1, 27, H, W)
+        # The qaz812345 pretrained weights were trained with bg_mode='concat' where
+        # the background frame is placed FIRST (channels 0-2), followed by the 8
+        # video frames (channels 3-26).  Confirmed from train.py visualisation code:
+        #   to_img_format(x, num_ch=3); x[:, 1:, ...]  ← skips index 0 = background.
+        # Sending frames-first (the previous order) put the oldest video frame into
+        # the background-filter channels of every conv layer, causing the model to
+        # activate on consistent background structure instead of the shuttle.
+        inp = torch.cat([bg_t, frames_t], dim=0).unsqueeze(0).to(self.device)  # (1, 27, H, W)  bg first
 
         use_amp = (self.device.type == "cuda")
         with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
@@ -205,6 +212,15 @@ class TrackNetV3Tracker:
         heatmap = heatmap_all.float()[0, -1]  # (H, W)
 
         conf = float(heatmap.max().item())
+
+        # TEMPORARY DIAGNOSTIC — remove after first confirmed run (Task 5-D)
+        if self._frame_count <= 20:
+            flat_idx = int(heatmap.argmax().item())
+            py, px = divmod(flat_idx, W)
+            print(f"[TRACKNETV3 DIAG] frame={self._frame_count} "
+                  f"heatmap_max={conf:.4f} heatmap_mean={float(heatmap.mean()):.4f} "
+                  f"argmax_px=({px},{py})")
+
         if conf < self.conf_threshold:
             self._traj_buffer.append((timestamp, -1.0, -1.0, 0.0))
             return {"shuttle": None}

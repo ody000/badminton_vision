@@ -183,6 +183,9 @@ def run(
 
     def _emit_stroke_event(hit_ev: HitEvent, timestamp: float, frame_idx: int, hit_player_id) -> None:
         """Classify and append a completed hit event (pre + post frames available)."""
+        # TEMPORARY DIAGNOSTIC (Task 5-E)
+        print(f"[HIT] frame={frame_idx} ts={timestamp:.3f}s player={hit_player_id}")
+
         stroke_result = stroke_classifier.classify(hit_ev)
         event = {
             "timestamp":       timestamp,
@@ -391,6 +394,11 @@ def run(
     }
 
     # ── Write JSON outputs ────────────────────────────────────────────────────
+    # TEMPORARY DIAGNOSTIC (Task 5-E)
+    frames_processed = len(tracking_results)
+    print(f"[MAIN] Hit events detected: {len(events)} across {frames_processed} frames "
+          f"({len(events)/max(frames_processed,1)*30*60:.1f} hits/min at 30fps)")
+
     def _write_json(path, data):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, default=str)
