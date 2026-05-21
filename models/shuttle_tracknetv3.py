@@ -238,17 +238,6 @@ class TrackNetV3Tracker:
 
         conf = float(heatmap.max().item())
 
-        # TEMPORARY DIAGNOSTIC — remove after first confirmed run (Task 5-D)
-        if self._frame_count <= 20:
-            flat_idx = int(heatmap.argmax().item())
-            py_hm, px_hm = divmod(flat_idx, W_hm)  # Correct: use heatmap width
-            px_img = px_hm * scale_x  # Upscale to image space
-            py_img = py_hm * scale_y
-            print(f"[TRACKNETV3 DIAG] frame={self._frame_count} "
-                  f"heatmap_max={conf:.4f} heatmap_shape=({H_hm}×{W_hm}) "
-                  f"scale=({scale_y:.1f}×{scale_x:.1f}) "
-                  f"argmax_hm=({px_hm},{py_hm}) argmax_img=({px_img:.1f},{py_img:.1f})")
-
         if conf < self.conf_threshold:
             self._traj_buffer.append((timestamp, -1.0, -1.0, 0.0))
             return {"shuttle": None}
