@@ -74,7 +74,7 @@ court_insert_alpha: 0.82
 #   Lower  = tighter hotspot (better for detailed coverage mapping).
 #   Kernel size is derived automatically as ceil(6*sigma)|1.
 #   Recommended: 8-12 for fine details, 20-30 for smooth coverage regions
-heatmap_gaussian_sigma: 9
+heatmap_gaussian_sigma: 9              # smallest smoothing for maximum detail
 player_heatmap_blur: 7        # legacy knob, superseded by heatmap_gaussian_sigma
 player_stamp_radius: 6
 player_p1_color_bgr: [57, 255, 20]   # neon green
