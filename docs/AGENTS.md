@@ -6,34 +6,39 @@ Architectural constraints and module contracts. Do not deviate without updating 
 
 ## Overview
 
-Pipeline: video → TrackNet (shuttle) + DINOv3-ViT (players) + RANSAC hit detection → stroke classification (MediaPipe + Transformer) → JSON artifacts + annotated MP4 + heatmap PNG.
+Pipeline: video → TrackNetV3 (shuttle) + YOLOv8 (players, centroid-tracked) + RANSAC hit detection → stroke classification (MediaPipe + StrokeTransformer) → JSON artifacts + annotated MP4 + heatmap PNG.
 
 `main.py` is headless SLURM-compatible. `tools/prepare_run.py` (local-only) handles court-corner GUI. `tools/viewer.py` (local-only DearPyGui) reviews results with overlay playback. `config.yaml` is single source of truth for all parameters.
 
-**MOG2 is no longer part of the inference pipeline.** Background subtraction was removed from both `TrackNetTracker` and `PlayerDetector` because its foreground threshold was suppressing ≥ 97% of valid detections. All frames are now processed as-is.
+**MOG2 is no longer part of the inference pipeline.** Background subtraction was removed from inference because its foreground threshold was suppressing ≥ 97% of valid detections. All frames are now processed as-is.
+
+**TrackNetV2 (shuttle_tracknet.py) has been removed.** Production pipeline uses TrackNetV3 exclusively (`tracknet_version: 3` in config). Legacy V2 code was cleaned up (May 21, 2026).
 
 ---
 
 ## Key Modules
 
-### `models/shuttle_tracknet.py` — `TrackNetTracker`
-- Accepts a single BGR frame + timestamp; maintains a 3-frame buffer internally.
-- Timestamp-aware buffer flush if gap > 2/(fps).
+### `models/shuttle_tracknetv3.py` — `TrackNetV3Tracker`
+- Accepts a single BGR frame + timestamp; requires pre-computed background tensor.
+- Maintains internal 3-frame buffer (handles timestamp gaps > 2/(fps)).
 - Resizes to (288, 512) before inference.
 - Returns `{"shuttle": (timestamp, x, y, w, h)}` if confidence > threshold, else `{}`.
-- `detect_batch(frames, timestamps)`: batches N frames into a single (N×9×H×W) GPU forward pass for ~3–5× better GPU utilisation. **CUDA only** — on CPU the batch assembly overhead exceeds the gain; `main.py` gates this on `cfg.device.startswith("cuda")` and falls back to sequential `detect()` on CPU.
-- **No MOG2 filter** — raw frames only; `mog2_manager` parameter removed.
+- `detect_batch(frames, timestamps)`: batches N frames for GPU efficiency. **CUDA only**; CPU falls back to sequential `detect()`.
+- **No MOG2 filter** — raw frames; background subtraction is implicit in TrackNetV3 architecture.
+- **Background pre-computation:** `estimate_background(video_path, n_frames=150)` extracts mean frame from first N frames; stored in memory for all subsequent inferences.
 
-### `models/player_dino.py` — `PlayerDetector` (DINOv3)
-- Standalone implementation (no slayminton/ dependency) for portability to OSCAR and other systems.
-- ViT-based detection: DINOv2 backbone + lightweight 2-layer detection head.
-- **Per-frame inference only** (no caching, no ByteTrack): 2–3 ms/frame, 5–8× faster than YOLOv8 (8–10 ms).
-- Single-class detection: "player" only (court constraint ensures ≤1 player visible at a time).
-- IDs are **frame-local ordinals** (0, 1, …). `PlayerContext` handles P1/P2 stability via first-seen slot assignment.
-- Input: any resolution (resized to 384×384 internally); output: bounding box + confidence.
-- Returns `[{"id": 0, "box": [x1,y1,x2,y2], "feet": (cx, y2)}]` or `[]` if no detection above threshold.
-- `player_conf_threshold` (default 0.25): min confidence to report a detection.
-- Training: fine-tune on COCO-format player dataset (min 5K images, recommended 10K+).
+### `models/player_yolo.py` — `PlayerDetector` (YOLOv8)
+- CNN-based detection: YOLOv8n fine-tuned on badminton player dataset.
+- Per-frame inference: ~5 ms/frame on GPU; deterministic predictions.
+- Multi-player support with **centroid-based persistent ID tracking** (no Kalman filter):
+  - Computes centroid of each detection bounding box.
+  - Matches current-frame centroids to previous-frame positions using exhaustive search (n≤4 players) or greedy matching (n>4).
+  - Assigns persistent IDs based on optimal matching; new detections get new IDs; unmatched old IDs are retired.
+  - Max matching distance: 200 px (configurable `_max_distance`).
+  - Performance: O(n³) on n=2 players ≈ negligible overhead.
+- Returns `[{"id": 0, "box": [x1,y1,x2,y2], "feet": (cx, y2)}]` or `[]` if no detections.
+- `player_conf_threshold` (default 0.5): min confidence to report a detection.
+- `set_detect_interval()` method: skip inference every N frames for throughput trade-off.
 
 ### `core/homography.py` — `CourtMapper`
 - `calibrate(image_corners)`: takes 6 pixel points (4 court corners + 2 midline).
@@ -61,10 +66,11 @@ Key behaviours (simplified May 2026):
 ### `core/analysis.py` — `Analysis`
 Direct port of slayminton. Rally duration statistics only.
 
-### `models/stroke_classifier.py` — `StrokeClassifier`
-- MediaPipe Pose (33 joints) + trajectory (pre/post) → `stroke_transformer.py`.
-- Output: `{"stroke_type": str, "confidence": float, ...}`.
-- `stroke_classify_enabled` (default `false` in `config.yaml`): skips MediaPipe init and model load entirely. Set to `true` for local post-processing runs where stroke labels are needed. SLURM inference jobs leave this off.
+### `models/stroke_classifier.py` & `models/stroke_transformer.py`
+- **StrokeClassifier** wrapper: MediaPipe Pose (33 joints) + pre/post trajectory → **StrokeTransformer** model.
+- **StrokeTransformer**: Transformer encoder + multi-head classification (100+ stroke classes).
+- Output: `{"stroke_type": str, "confidence": float, ...}` per HitEvent.
+- `stroke_classify_enabled` (default `false` in `config.yaml`): skips MediaPipe init and model load entirely. Set to `true` for local post-processing runs where stroke labels are needed. SLURM inference jobs leave this off (CPU bottleneck).
 
 ### `utils/mog.py` — `MOG2Manager`
 - Stateful wrapper for cv2.BackgroundSubtractorMOG2.

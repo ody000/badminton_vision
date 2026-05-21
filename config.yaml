@@ -51,7 +51,7 @@ rally_min_hits: 0                 # was 1 — hit detection is separate; don't g
 # ─── Player tracking ─────────────────────────────────────────────────────────
 player_conf_threshold: 0.25
 player_weights: models/yolo.pt              # YOLO v8 player detector
-player_detect_interval: 3                   # run YOLO every 3rd frame (Phase 1-B interval caching)
+player_detect_interval: 1                   # frame-by-frame tracking with ByteTrack (most accurate)
 
 # ─── Court ───────────────────────────────────────────────────────────────────
 court_real_width_cm: 610.0
@@ -71,9 +71,10 @@ court_insert_h: 300
 court_insert_alpha: 0.82
 # heatmap_gaussian_sigma: Gaussian smoothing for the court heatmap.
 #   Higher = softer, broader gradient (better for long rallies).
-#   Lower  = tighter hotspot (better for short clips).
+#   Lower  = tighter hotspot (better for detailed coverage mapping).
 #   Kernel size is derived automatically as ceil(6*sigma)|1.
-heatmap_gaussian_sigma: 25
+#   Recommended: 8-12 for fine details, 20-30 for smooth coverage regions
+heatmap_gaussian_sigma: 9
 player_heatmap_blur: 7        # legacy knob, superseded by heatmap_gaussian_sigma
 player_stamp_radius: 6
 player_p1_color_bgr: [57, 255, 20]   # neon green

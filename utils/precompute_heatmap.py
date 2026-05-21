@@ -239,24 +239,37 @@ def precompute_heatmap(
             target = heatmaps[pid]
             cv2.circle(target, (ix, iy), stamp_radius, 1.0, -1)
 
-    # Build tinted JET heatmaps
-    tinted_heatmaps = []
+    # Build tinted JET heatmaps for each player
+    tinted_heatmaps = {}  # player_id → tinted heatmap
     for pid in player_ids:
         color = player_colors.get(pid, (57, 255, 20))
         tinted = _make_tinted_jet(heatmaps[pid], gaussian_sigma, color, stamp_radius)
         if tinted is not None:
-            tinted_heatmaps.append(tinted)
+            tinted_heatmaps[pid] = tinted
 
     # Start from the court background
-    canvas = draw_court_background()
+    court_bg = draw_court_background().astype(np.float32)
 
-    # Blend each player heatmap at the requested opacity
-    for tinted in tinted_heatmaps:
-        canvas = cv2.addWeighted(canvas, 1.0 - opacity, tinted, opacity, 0)
+    # Blend multiple player heatmaps so both P1 (green) and P2 (orange) are visible.
+    # Formula: court * (1 - opacity) + sum(heatmap_i * opacity / n_players)
+    # This ensures equal opacity for each player while preserving court visibility.
+    canvas = court_bg * (1.0 - opacity)
+
+    n_heatmaps = len(tinted_heatmaps)
+    per_heatmap_opacity = opacity / max(n_heatmaps, 1)
+
+    for heatmap in tinted_heatmaps.values():
+        canvas = canvas + heatmap.astype(np.float32) * per_heatmap_opacity
+
+    # Clip to valid uint8 range
+    canvas = np.clip(canvas, 0, 255).astype(np.uint8)
 
     # Save
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     cv2.imwrite(output_path, canvas)
     print(f"[HEATMAP] saved {output_path} ({INSERT_W}×{INSERT_H})")
+
+    if len(tinted_heatmaps) > 1:
+        print(f"[HEATMAP] Combined {len(tinted_heatmaps)} player heatmaps with visibility balanced")
 
     return canvas

@@ -62,7 +62,6 @@ def run(
     from utils.config_loader import load_config
     from utils.video_io import VideoIOHandler
     from utils.visualization import render_court_insert, render_frame
-    from models.shuttle_tracknet import TrackNetTracker
     from models.shuttle_tracknetv3 import TrackNetV3Tracker
     from models.player_yolo import PlayerDetector
     from models.stroke_classifier import StrokeClassifier
@@ -91,18 +90,14 @@ def run(
     print(f"[MAIN] run_dir={run_dir}")
 
     # ── Initialize components ─────────────────────────────────────────────────
-    # Determine which TrackNet version to use
-    _use_v3 = int(getattr(cfg, "tracknet_version", 3)) == 3
-    if _use_v3:
-        from utils.background import estimate_background
-        _bg_frames = int(getattr(cfg, "tracknet_bg_frames", 150))
-        print(f"[MAIN] Estimating video background from first {_bg_frames} frames...")
-        _background = estimate_background(video_path, n_frames=_bg_frames,
-                                          resize_hw=(int(getattr(cfg, "tracknet_expected_h", 288)),
-                                                     int(getattr(cfg, "tracknet_expected_w", 512))))
-        tracknet = TrackNetV3Tracker(cfg=cfg, background=_background)
-    else:
-        tracknet = TrackNetTracker(cfg=cfg)
+    # TrackNetV3 is now the only supported shuttle tracker
+    from utils.background import estimate_background
+    _bg_frames = int(getattr(cfg, "tracknet_bg_frames", 150))
+    print(f"[MAIN] Estimating video background from first {_bg_frames} frames...")
+    _background = estimate_background(video_path, n_frames=_bg_frames,
+                                      resize_hw=(int(getattr(cfg, "tracknet_expected_h", 288)),
+                                                 int(getattr(cfg, "tracknet_expected_w", 512))))
+    tracknet = TrackNetV3Tracker(cfg=cfg, background=_background)
     device = torch.device(getattr(cfg, "device", "cuda" if torch.cuda.is_available() else "cpu"))
     _player_weights = (
         getattr(cfg, "player_weights", None)
@@ -120,8 +115,8 @@ def run(
     )
     yolo = PlayerDetector(cfg=yolo_cfg)
     # ── CUDA diagnostic (Priority 0 verification) ───────────────────────────────
-    # TrackNetV3Tracker stores network as .tracknet; V2 TrackNetTracker uses .model
-    _tracknet_net = getattr(tracknet, "tracknet", None) or getattr(tracknet, "model", None)
+    # TrackNetV3Tracker stores network as .tracknet
+    _tracknet_net = getattr(tracknet, "tracknet", None)
     _tracknet_device = next(_tracknet_net.parameters()).device if _tracknet_net is not None else "unknown"
     # YOLO device comes from cfg directly (already resolved to torch.device)
     _yolo_device = str(device)
