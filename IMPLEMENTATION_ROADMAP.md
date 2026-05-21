@@ -2,7 +2,7 @@
 
 **For Haiku handoff.** All paths relative to repo root. Do not alter files or logic not mentioned here.
 
-Pipeline: `slurm_track.sh → main.py → TrackNetV3Tracker (shuttle) + DINOTracker (players) + HitDetector + GameState`
+Pipeline: `slurm_track.sh → main.py → TrackNetV3Tracker (shuttle) + YOLO (players) + HitDetector + GameState`
 
 ---
 
@@ -20,25 +20,27 @@ Pipeline: `slurm_track.sh → main.py → TrackNetV3Tracker (shuttle) + DINOTrac
 | Bug 5-C: Heatmap blank | Downstream of 5-A; also fixed `feet_px` alias in `main.py` serialization |
 | Task 5-D/E: Diagnostic prints | `[TRACKNETV3 DIAG]` and `[DINO DIAG]` and `[HIT]` prints added; still in code |
 | Task 5-G: TrackNet coordinate scaling | `_last_orig_h/w` stored in `detect()`; `scale = orig_h/H_hm` in `_run_tracknet()` |
-| Task 5-F: Two-player DINO architecture | `TRACKED_CLASSES = ("player_1","player_2")`; head outputs `(B,2,5)`; retrained checkpoint deployed to `models/dino_player.pt` |
-| Task 5-H: MOG2 fallback | Cancelled — DINO two-player succeeded |
+| Task 5-F: Two-player DINO architecture | Attempted but abandoned; reverted to YOLO (models/yolo.pt) for production |
+| Task 5-H: MOG2 fallback | Cancelled — DINO approach abandoned; YOLO used instead |
 | Task 5-I: Shuttle circle too large | `box_size` 16→7 heatmap px + 22px video-space cap in `shuttle_tracknetv3.py` |
 | Task 5-J Cause 3: Background recomputed every frame | `set_background()` now precomputes `self._background_t` tensor once; `_run_tracknet()` reuses it |
 | Task 5-L: Heatmap wrong frame dimensions | `_frame_hw` captured from first decoded frame in `_process_frame`; replaces broken bbox-corner estimate |
 
 ---
 
-## 🔄 Task 5-K — DINO patch-average retrain (fix applied, retrain pending)
+## ⛔ Task 5-K — DINO two-player architecture (abandoned; reverted to YOLO)
 
-**Problem confirmed from production data:** DINO position std was 11-23px vs. 100-300px of actual player movement. Root cause: `_extract_cls_token` returned the ViT CLS token, which collapses both players' spatial features into one vector. The head learned mean positions (mAP=0.93 because players are usually near their baseline), not actual tracking.
+**Status:** CANCELLED after multiple retraining attempts. DINO architecture could not achieve stable two-player tracking despite architectural modifications (patch-average pooling, dual-head outputs, LoRA fine-tuning).
 
-**Fix already applied to `models/player_dino.py`:** `_extract_cls_token` now returns `features["x_norm_patchtokens"].mean(dim=1)` — the average of all spatial patch tokens. Each patch token encodes a 14×14 image region, so the mean shifts with player positions rather than collapsing them.
+**Decision:** Revert to YOLOv8 (models/yolo.pt), which is fine-tuned for badminton player detection and consistently outperforms DINO in this task.
 
-**Action required:** Run `slurm_train.sh` — no other code changes needed. The fix is already in the source.
+**Code changes:**
+- `main.py` line 67: Import changed from `models.player_dino` → `models.player_yolo`
+- `main.py` line 225: API call changed from `detect_yolo_compat()` → `detect()`
+- `main.py` line 131: Updated diagnostic string from "DINOTracker" → "YOLO"
+- `models/player_yolo.py`: Added `set_detect_interval()` method for API compatibility with existing pipeline
 
-**Expected:** position std increases to 100-300px; boxes visibly follow players during movement. If std stays < 50px after training, increase `BOX_LOSS_WEIGHT` from `0.5` to `1.0–2.0` in `player_dino.py`.
-
-**Note:** Requires full retrain from scratch — old checkpoint head weights are calibrated to CLS token distribution and are incompatible.
+**Rationale:** YOLO is simpler, faster, deterministic, and production-proven on badminton video. The architectural overhead of DINO did not justify the training complexity or uncertainty. The test fine-tuning checkpoint (dino_player.pt) is retained but no longer used.
 
 ---
 

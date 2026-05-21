@@ -60,6 +60,10 @@ class PlayerDetector:
         print(f"[YOLO] Loading model from {weights} (detect_interval={self._detect_interval})")
         self.model = YOLO(weights)
 
+    def set_detect_interval(self, interval: int) -> None:
+        """Set detection interval for frame-skipping cache."""
+        self._detect_interval = max(1, int(interval))
+
     def detect(self, frame: np.ndarray) -> list[dict]:
         """Run YOLOv8 detection on a BGR frame.
 

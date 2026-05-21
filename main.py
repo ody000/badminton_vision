@@ -64,7 +64,7 @@ def run(
     from utils.visualization import render_court_insert, render_frame
     from models.shuttle_tracknet import TrackNetTracker
     from models.shuttle_tracknetv3 import TrackNetV3Tracker
-    from models.player_dino import PlayerDetector
+    from models.player_yolo import PlayerDetector
     from models.stroke_classifier import StrokeClassifier
     from core.homography import CourtMapper
     from core.game_state import GameState, build_rally_status_per_frame
@@ -128,7 +128,7 @@ def run(
     # ── Phase 1-B: Player detection interval caching ─────────────────────────────
     _player_interval = int(getattr(cfg, "player_detect_interval", 1))
     yolo.set_detect_interval(_player_interval)
-    print(f"[MAIN] DINOTracker interval caching: every {_player_interval} frame(s)")
+    print(f"[MAIN] YOLO interval caching: every {_player_interval} frame(s)")
 
     court_mapper = CourtMapper(cfg)
     court_points_file = getattr(cfg, "court_points_file", "data/input/court_points.json")
@@ -222,7 +222,7 @@ def run(
         shuttle: Shuttle | None = Shuttle.from_tuple(shuttle_tuple) if shuttle_tuple else None
 
         # 2. Player detection + real-world transform + history accumulation
-        raw_players = yolo.detect_yolo_compat(frame_bgr)
+        raw_players = yolo.detect(frame_bgr)
         players = player_ctx.update(raw_players, court_mapper)
 
         # 3. Hit detection
