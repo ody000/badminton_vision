@@ -1,5 +1,32 @@
 # Issues & Resolutions
 
+## ✅ DINO Two-Player Architecture Abandoned — Reverted to YOLO (May 21, 2026)
+
+**Problem:** After multiple retraining attempts, DINOv2-based two-player detection could not achieve stable tracking. The model consistently failed to discriminate between player positions despite architectural modifications (patch-average pooling, dual-head outputs, LoRA fine-tuning).
+
+**Root Causes Identified:**
+1. **Feature collapse**: ViT CLS token or patch averaging still produced spatially invariant embeddings → model learned baseline positions instead of tracking
+2. **Training instability**: Loss function had numerically unstable confidence prediction; gradient flow was poor
+3. **Architecture mismatch**: Lightweight detection head inadequate for fine-grained spatial regression on ViT embeddings
+
+**Solution:** Abandoned DINO architecture entirely; reverted to YOLOv8 (fine-tuned checkpoint at `models/yolo.pt`).
+
+**Changes:**
+- `main.py` line 67: Changed import from `models.player_dino` → `models.player_yolo`
+- `main.py` line 225: Changed detection call from `detect_yolo_compat()` → `detect()`
+- `models/player_yolo.py` lines 63-65: Added `set_detect_interval()` method for API compatibility
+- Removed `PHASE_6_TWO_PLAYER_DINO.md` and `DINO_FIXES.md` from docs/
+
+**Why YOLO works better:**
+- Deterministic CNNs with spatial feature maps (vs. global ViT embeddings)
+- Fine-tuned on badminton player data; proven stable on test footage
+- Faster inference (≤5ms per frame vs. ≥50ms for DINO)
+- Simpler training pipeline; no exotic augmentation or LoRA tuning required
+
+**Lesson:** For strongly spatial tasks (bounding box regression), spatially-aware architectures (CNN-based) outperform global-pooling architectures (ViT) even with aggressive fine-tuning. YOLO's inductive bias toward spatial localization is correct for this problem domain.
+
+---
+
 ## ✅ TrackNet Fine-tuning Failure — Switched to Slayminton Pretrained (May 18, 2026)
 
 **Problem:** Custom fine-tuned TrackNet model focused on white background dots instead of shuttlecock; ignored actual shuttle movement.

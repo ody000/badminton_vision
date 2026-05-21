@@ -271,6 +271,7 @@ class Viewer:
                     frame_w=self.vid_w,
                     frame_h=self.vid_h,
                     output_path=str(hm_path),
+                    gaussian_sigma=15.0,  # Reduced from 40 for sharper detail
                     player_ids=sorted(list(player_ids)) if player_ids else [1, 2],
                 )
                 self._heatmap_base = img
@@ -402,6 +403,12 @@ class Viewer:
         shuttle_j  = tracking.get("shuttle")
         rally_act  = tracking.get("rally_active", False)
         hit_events = self._events_by_frame.get(idx, [])
+
+        # Debug: check if players are present
+        if idx == 0 and players:
+            print(f"[VIEWER] Frame 0: found {len(players)} player(s)")
+            for p in players:
+                print(f"  - id={p.get('id')} box={p.get('box')} feet={p.get('feet_px') or p.get('feet')}")
 
         # ── Player bounding boxes ─────────────────────────────────────
         if self.show_players:
