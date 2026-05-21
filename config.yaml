@@ -50,8 +50,8 @@ rally_min_hits: 0                 # was 1 — hit detection is separate; don't g
 
 # ─── Player tracking ─────────────────────────────────────────────────────────
 player_conf_threshold: 0.25
-player_weights: models/dino_player.pt      # DINOv3 player detector (fine-tuned on custom data)
-player_detect_interval: 3                  # run DINO every 3rd frame (Phase 1-B interval caching)
+player_weights: models/yolo.pt              # YOLO v8 player detector
+player_detect_interval: 3                   # run YOLO every 3rd frame (Phase 1-B interval caching)
 
 # ─── Court ───────────────────────────────────────────────────────────────────
 court_real_width_cm: 610.0

@@ -109,20 +109,25 @@ def run(
         or getattr(cfg, "player_weights_path", None)
         or getattr(cfg, "player_model_path", None)
     )
-    yolo = PlayerDetector(
-        model_path=_player_weights,
-        weights_path=None,
-        pretrained_backbone_path=getattr(cfg, "pretrained_backbone_path", None),
+    
+    # Create a config-like object for PlayerDetector (player_yolo expects cfg object)
+    from types import SimpleNamespace
+    yolo_cfg = SimpleNamespace(
+        player_weights=_player_weights,
+        player_conf_threshold=getattr(cfg, "player_conf_threshold", 0.5),
         device=device,
-        input_size=getattr(cfg, "player_input_size", 384),
+        player_detect_interval=int(getattr(cfg, "player_detect_interval", 1)),
     )
+    yolo = PlayerDetector(cfg=yolo_cfg)
     # ── CUDA diagnostic (Priority 0 verification) ───────────────────────────────
     # TrackNetV3Tracker stores network as .tracknet; V2 TrackNetTracker uses .model
     _tracknet_net = getattr(tracknet, "tracknet", None) or getattr(tracknet, "model", None)
     _tracknet_device = next(_tracknet_net.parameters()).device if _tracknet_net is not None else "unknown"
+    # YOLO device comes from cfg directly (already resolved to torch.device)
+    _yolo_device = str(device)
     print(f"[MAIN] CUDA diagnostic: "
           f"torch.cuda.is_available()={torch.cuda.is_available()}, "
-          f"yolo.encoder.device={next(yolo.encoder.parameters()).device}, "
+          f"yolo.device={_yolo_device}, "
           f"tracknet.device={_tracknet_device}")
 
     # ── Phase 1-B: Player detection interval caching ─────────────────────────────
