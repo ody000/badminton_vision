@@ -548,9 +548,16 @@ class DINODataset(Dataset):
     def _pick_representative_boxes(
         self, anns: Iterable[dict], img_w: float, img_h: float
     ) -> Dict[str, Optional[torch.Tensor]]:
-        """Pick two player boxes: player_1 (top) and player_2 (bottom), or largest boxes.
+        """Pick two player boxes: the two largest people (by area).
 
-        For two-player tracking, we need to return two player boxes sorted by y-coordinate.
+        For two-player tracking, we pick the two largest "person" detections.
+        This is robust because badminton players are usually the largest/most
+        prominent people in the frame, while spectators/coaches are background.
+
+        NOTE (May 2026): Previous approach sorted by y-coordinate, but this was
+        inconsistent — the same player would sometimes be labeled player_1,
+        sometimes player_2 across frames, corrupting training signal. Sorting by
+        area is more robust and prevents label flipping.
         """
         player_boxes = []
 
@@ -571,14 +578,15 @@ class DINODataset(Dataset):
             h = max(0.0, min(h, img_h - y))
 
             box_tensor = torch.tensor([x, y, w, h], dtype=torch.float32)
-            y_center = y + h / 2.0
-            player_boxes.append((y_center, box_tensor))
+            area = w * h  # Track box area for sorting
+            player_boxes.append((area, box_tensor))
 
-        # Sort by y-coordinate (top to bottom)
-        player_boxes.sort(key=lambda p: p[0])
+        # Sort by area (descending) to pick the two largest people
+        # This is more robust than y-coordinate sorting, which was inconsistent
+        player_boxes.sort(key=lambda p: p[0], reverse=True)
 
         out = {}
-        # Assign the two topmost players to player_1 and player_2
+        # Assign the two largest players to player_1 and player_2
         for idx, class_name in enumerate(TRACKED_CLASSES):
             if idx < len(player_boxes):
                 out[class_name] = player_boxes[idx][1]
